@@ -1,0 +1,6 @@
+0001-ios-buildgraph.patch
+0002-ios-vulkan-loader.patch
+0003-swift-c-bridge.patch
+0004-ios-runtime-guards.patch
+0005-common-virtual-buffer-move.patch
+# Oaknut's patch is applied separately inside the pinned submodule by the build script.
