@@ -1,0 +1,19 @@
+Experimental Citron iPhoneOS build carrier. No successful compile or device run is claimed.
+
+Upstream: https://github.com/citron-neo/emulator
+Pinned commit: c3aa70f81e15ea97ee85b6a9a71cbf75d370851e (2026-10-25)
+Citron derives from the Yuzu emulator project. Preserve upstream copyright notices.
+Upstream aggregate license: GPL-3.0-or-later; see COPYING.
+Individual upstream files retain their own SPDX notices.
+New prototype scripts and patches: GPL-3.0-or-later.
+
+Dependencies are fetched from their primary repositories with fixed versions/digests.
+MoltenVK v1.4.2: https://github.com/KhronosGroup/MoltenVK (Apache-2.0).
+OpenSSL 3.4.1: https://github.com/openssl/openssl (Apache-2.0).
+FFmpeg n8.0: https://github.com/FFmpeg/FFmpeg (this recipe does not enable GPL/nonfree codecs;
+its LGPL-2.1 notice is included in the resulting artifact).
+Further CPM dependencies and licenses remain governed by the pinned upstream project.
+
+The workflow builds code only. It includes no console firmware, keys, games,
+personal data, signing certificates or account credentials. The output IPA is unsigned.
+Creating the artifact does not prove JIT, GPU, memory or game compatibility on a device.
