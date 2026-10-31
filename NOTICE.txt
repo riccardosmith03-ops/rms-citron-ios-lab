@@ -24,3 +24,34 @@ V4 Sirit API compatibility patch:
   opcode366 builder. No shader replacement or capability bypass.
   https://github.com/yuzu-mirror/sirit
   https://registry.khronos.org/SPIR-V/specs/unified1/SPIRV.html#OpGroupNonUniformQuadSwap
+
+V5 audio source attribution:
+Cubeb iPhoneOS audio candidate
+
+Cubeb source: https://github.com/mozilla/cubeb
+Exact source commit: 46906c7bba281a9cc277881e9cf9e32909f8dbf2
+License: ISC-style; the original Cubeb LICENSE is retained in the fetched source
+and copied to the packaged dependency licenses/cubeb/LICENSE directory.
+
+The AudioUnit iOS implementation is the unmodified Mozilla downstream patch:
+https://github.com/mozilla-firefox/cedar/commit/a1a11486fec5b96221ec496caab0607757137d02
+"Bug 1834920 - Make audio IO work on iOS in Gecko", reviewed by glandium and pehrsons.
+Only media/libcubeb/0004-audiounit-ios-compile-fixes.patch is applied to Cubeb.
+Its SHA-256 is f2fad209e32258161619f6f8b548ca9f8bf94b9267e7c9cef6fd5ab66c2e60c5.
+No Gecko platform configuration, Rust configuration, or unrelated files are copied.
+The applied cubeb_audiounit.cpp is byte-identical to Mozilla's fixed source.
+Original Mozilla copyright and ISC-style notices remain intact.
+
+Local integration changes select AudioUnit plus AudioToolbox/CoreFoundation on
+iPhoneOS, retain the macOS-only run-loop helper/CoreServices on macOS, require
+the vendored Speex resampler for iPhoneOS, and accept only NOT_SUPPORTED from the
+iOS minimum-latency query before Citron's existing real output-stream open test.
+Other initialization/stream errors still reject the backend.
+
+The vendored Speex resampler retains its original authors' copyright notices
+and BSD-style terms. Its source files, including complete embedded notices,
+are copied into licenses/cubeb/speex-source-with-license-notices for packaging.
+
+This remains an untested application port. The native compile/link probe is not
+run and does not demonstrate audible output, device changes, microphone input,
+interruptions, or background/foreground recovery on an iPhone.
