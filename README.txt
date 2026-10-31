@@ -1,7 +1,9 @@
 Citron iPhoneOS prototype — portable build carrier
 
-Status: first Mac attempt stopped during CMake configuration.
-The iPhone app has NOT been compiled or run; no IPA is available yet.
+Status: two Mac attempts completed without an IPA. The second passed CMake
+configuration and reached real ARM64/iPhoneOS C++ compilation, then failed on
+a missing Sirit quad-swap builder. This V4 revision still needs a successful build
+and device tests.
 This folder contains no account credentials, personal data, games or console keys.
 Do not present its existence or a future successful build as proof that games work.
 
@@ -16,8 +18,11 @@ The candidate series includes the runtime/JIT probe, ownership fix and pinned
 Oaknut error handling. The first Mac attempt exposed dependency test configuration
 and architecture-check defects. This revision disables dependency tests, selects
 ARM64/AAPCS for Boost.Context, and makes archive architecture checks fail closed.
-Local checks passed; the corrected version still requires a real Mac build and
-subsequent device tests. Additional compiler, linker or runtime errors may appear.
+This revision also checks out the exact Sirit pin, verifies both source hashes,
+applies the genuine opcode366 builder with git apply checks and post-patch hashes,
+and supplies it through documented CPM_sirit_SOURCE. Shader gates are unchanged.
+Local checks passed; V4 still requires a new Mac build and subsequent device tests.
+Additional compiler, linker or runtime errors may appear.
 
 Build recipe:
 1. Obtain a fresh full checkout of the pinned upstream commit (the workflow does this).
@@ -44,3 +49,6 @@ Current run status: https://github.com/riccardosmith03-ops/rms-citron-ios-lab/ac
 https://docs.github.com/en/actions/reference/runners/github-hosted-runners
 https://docs.github.com/en/billing/concepts/product-billing/github-actions
 https://docs.github.com/en/actions/tutorials/store-and-share-data
+
+Second attempt: https://github.com/riccardosmith03-ops/rms-citron-ios-lab/actions/runs/41231489323
+Latest attempt status: https://github.com/riccardosmith03-ops/rms-citron-ios-lab/actions

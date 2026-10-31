@@ -23,6 +23,37 @@ git -C "$source_dir" submodule update --init --depth=1 -- externals/oaknut
 git -C "$source_dir/externals/oaknut" apply --check "$project_dir/patches/oaknut-jit-errors.patch"
 git -C "$source_dir/externals/oaknut" apply "$project_dir/patches/oaknut-jit-errors.patch"
 
+# Patch only the verified third-party API; CPM must consume this exact source.
+sirit_dir="$deps/src/sirit-quad-swap"
+[[ ! -e "$sirit_dir" ]] || { echo 'Refusing an existing Sirit source directory.' >&2; exit 8; }
+git init -q "$sirit_dir"
+git -C "$sirit_dir" config core.autocrlf false
+git -C "$sirit_dir" remote add origin https://github.com/yuzu-mirror/sirit.git
+git -C "$sirit_dir" fetch --depth=1 origin ab75463999f4f3291976b079d42d52ee91eebf3f
+git -C "$sirit_dir" checkout --detach -q FETCH_HEAD
+python3 - "$sirit_dir" <<'PY_SIRIT_QUAD_PATCH'
+import hashlib,pathlib,subprocess,sys
+root=pathlib.Path(sys.argv[1]).resolve(strict=True)
+expected_before={'include/sirit/sirit.h': '943e562be42e790f65ec2c011a77d5cecd4089d9ff3c29c3c0d9b2f44d52e2c3', 'src/instructions/group.cpp': '8601bf3b67c937c72744296bbad8dbe92bec8dc3e0bcd9a9fbe3063a28a69aac'}
+expected_after={'include/sirit/sirit.h': '662acf6f3da25e8e0ce630f7bd8c18b45a65d1b8e9c4c3fec46648ee64e5dd1f', 'src/instructions/group.cpp': 'd4fa2e0a1687f3bc5b684019440e40a16b9e6f81a6a4b6f45dbd05e25ce110c5'}
+patch="--- a/include/sirit/sirit.h\n+++ b/include/sirit/sirit.h\n@@ -1179,6 +1179,9 @@\n     /// group xor'ed with mask.\n     Id OpGroupNonUniformShuffleXor(Id result_type, Id scope, Id value, Id mask);\n \n+    /// Quad swap; direction is an unsigned constant Id with value 0, 1, or 2.\n+    Id OpGroupNonUniformQuadSwap(Id result_type, Id scope, Id value, Id direction);\n+\n     /// Evaluates a predicate for all active invocations in the group, resulting in\n     /// true if predicate evaluates to true for all active invocations in the\n     /// group, otherwise the result is false.\n--- a/src/instructions/group.cpp\n+++ b/src/instructions/group.cpp\n@@ -65,6 +65,12 @@\n                  << mask << EndOp{};\n }\n \n+Id Module::OpGroupNonUniformQuadSwap(Id result_type, Id scope, Id value, Id direction) {\n+    code->Reserve(6);\n+    return *code << OpId{spv::Op::OpGroupNonUniformQuadSwap, result_type} << scope << value\n+                 << direction << EndOp{};\n+}\n+\n Id Module::OpGroupNonUniformAll(Id result_type, Id scope, Id predicate) {\n    code->Reserve(5);\n    return *code << OpId{spv::Op::OpGroupNonUniformAll, result_type} << scope << predicate << EndOp{};\n"
+assert subprocess.check_output(['git','-C',str(root),'rev-parse','HEAD'],text=True).strip()=='ab75463999f4f3291976b079d42d52ee91eebf3f'
+assert not subprocess.check_output(['git','-C',str(root),'status','--porcelain']), 'Sirit source is not pristine'
+for name,digest in expected_before.items():
+ p=root/name
+ assert not p.is_symlink() and p.resolve(strict=True).is_relative_to(root)
+ assert hashlib.sha256(p.read_bytes()).hexdigest()==digest, 'Unexpected Sirit source: '+name
+assert hashlib.sha256(patch.encode('utf-8')).hexdigest()=='4ee183bfe1c5654389cddd03910c0844f1c1f5d1c5f7de5cf379e93de8362806'
+subprocess.run(['git','-C',str(root),'apply','--check','-'],input=patch.encode('utf-8'),check=True)
+subprocess.run(['git','-C',str(root),'apply','-'],input=patch.encode('utf-8'),check=True)
+for name,digest in expected_after.items():
+ assert hashlib.sha256((root/name).read_bytes()).hexdigest()==digest, 'Patched Sirit SHA mismatch: '+name
+changed=set(subprocess.check_output(['git','-C',str(root),'diff','--name-only'],text=True).splitlines())
+assert changed==set(expected_after), 'Unexpected Sirit modification'
+subprocess.run(['git','-C',str(root),'diff','--check'],check=True)
+print('Pinned Sirit quad-swap opcode366 builder patched; shader semantics and feature gates preserved.')
+PY_SIRIT_QUAD_PATCH
+
 # This ownership test runs as a HOST Mac process, with iPhoneOS flags explicitly unset.
 env -u SDKROOT -u IPHONEOS_DEPLOYMENT_TARGET -u CFLAGS -u CXXFLAGS -u CPPFLAGS -u LDFLAGS \
     xcrun --sdk macosx clang++ -std=c++23 \
@@ -48,6 +79,7 @@ cmake -S "$source_dir" -B "$build_dir" -G Xcode \
     -DBUILD_TESTING=OFF -DDYNARMIC_TESTS=OFF \
     -DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE_OSX_DEPLOYMENT_TARGET=17.4 \
     -DCITRON_USE_CPM=ON -DCITRON_CHECK_SUBMODULES=OFF \
+    -DCPM_sirit_SOURCE="$sirit_dir" \
     -DCITRON_IOS_DEPS_PREFIX="$deps/prefix" \
     -DCITRON_IOS_MOLTENVK_XCFRAMEWORK="$xcf" \
     -DCITRON_IOS_BUNDLE_IDENTIFIER=org.citron.experimental-ios \

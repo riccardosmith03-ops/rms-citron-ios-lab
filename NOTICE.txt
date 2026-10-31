@@ -17,3 +17,10 @@ Further CPM dependencies and licenses remain governed by the pinned upstream pro
 The workflow builds code only. It includes no console firmware, keys, games,
 personal data, signing certificates or account credentials. The output IPA is unsigned.
 Creating the artifact does not prove JIT, GPU, memory or game compatibility on a device.
+
+V4 Sirit API compatibility patch:
+  yuzu-mirror/sirit commit ab75463999f4f3291976b079d42d52ee91eebf3f
+  Retains upstream BSD-3-Clause notices; adds the actual SPIR-V quad-swap
+  opcode366 builder. No shader replacement or capability bypass.
+  https://github.com/yuzu-mirror/sirit
+  https://registry.khronos.org/SPIR-V/specs/unified1/SPIRV.html#OpGroupNonUniformQuadSwap
