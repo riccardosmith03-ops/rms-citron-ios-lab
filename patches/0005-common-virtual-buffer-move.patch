@@ -1,0 +1,27 @@
+--- a/src/common/virtual_buffer.h
++++ b/src/common/virtual_buffer.h
+@@ -3,6 +3,7 @@
+ 
+ #pragma once
+ 
++#include <cstddef>
+ #include <utility>
+ 
+ namespace Common {
+@@ -33,10 +34,14 @@
+     VirtualBuffer& operator=(const VirtualBuffer&) = delete;
+ 
+     VirtualBuffer(VirtualBuffer&& other) noexcept
+-        : alloc_size{std::exchange(other.alloc_size, 0)}, base_ptr{std::exchange(other.base_ptr),
+-                                                                   nullptr} {}
++        : alloc_size{std::exchange(other.alloc_size, 0)},
++          base_ptr{std::exchange(other.base_ptr, nullptr)} {}
+ 
+     VirtualBuffer& operator=(VirtualBuffer&& other) noexcept {
++        if (this == &other) {
++            return *this;
++        }
++        FreeMemoryPages(base_ptr, alloc_size);
+         alloc_size = std::exchange(other.alloc_size, 0);
+         base_ptr = std::exchange(other.base_ptr, nullptr);
+         return *this;

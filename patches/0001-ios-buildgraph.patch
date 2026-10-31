@@ -1,0 +1,186 @@
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -7,7 +7,30 @@
+ # Set minimum CMake policy version
+ set(CMAKE_POLICY_VERSION_MINIMUM 3.5)
+ 
++# Experimental iPhoneOS build. Desktop platforms retain upstream defaults.
++if (CMAKE_SYSTEM_NAME STREQUAL "iOS")
++    set(CITRON_IOS TRUE)
++    set(CMAKE_OSX_DEPLOYMENT_TARGET "17.4" CACHE STRING "Prototype minimum iOS")
++    set(CMAKE_POSITION_INDEPENDENT_CODE ON)
++    set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)
++    foreach(_desktop_option ENABLE_QT ENABLE_SDL2 CITRON_USE_EXTERNAL_SDL2
++            ENABLE_LIBUSB CITRON_ROOM CITRON_TESTS CITRON_SHADER_TOOL
++            ENABLE_WEB_SERVICE ENABLE_OPENSSL CITRON_USE_BUNDLED_FFMPEG
++            CITRON_ENABLE_LTO CITRON_ENABLE_PGO_GENERATE CITRON_ENABLE_PGO_USE
++            CITRON_USE_PRECOMPILED_HEADERS CITRON_BUNDLE_SCARLETNX)
++        set(${_desktop_option} OFF CACHE BOOL "Disabled for iOS prototype" FORCE)
++    endforeach()
++    set(CITRON_USE_CPM ON CACHE BOOL "iOS source dependencies" FORCE)
++    set(CITRON_DOWNLOAD_TIME_ZONE_DATA ON CACHE BOOL "Use host-independent tzdb" FORCE)
++else()
++    set(CITRON_IOS FALSE)
++endif()
++
+ project(citron)
++if (CITRON_IOS)
++    add_compile_definitions(CITRON_IOS=1 VK_USE_PLATFORM_METAL_EXT=1)
++    include(${CMAKE_SOURCE_DIR}/CMakeModules/ios_prebuilt_dependencies.cmake)
++endif()
+ 
+ # clang-cl + Ninja needs an explicit generic ASM rule for .s/.S sources.
+ if(CITRON_CLANGCL AND CMAKE_GENERATOR MATCHES "Ninja")
+@@ -701,8 +724,8 @@
+     find_package(PkgConfig REQUIRED)
+     pkg_check_modules(LIBVA libva)
+ endif()
+-if (NOT CITRON_USE_BUNDLED_FFMPEG)
+-    # Use system installed FFmpeg
++if (NOT CITRON_USE_BUNDLED_FFMPEG AND NOT CITRON_IOS)
++    # iOS uses the explicitly built iPhoneOS archives, never host Homebrew FFmpeg.
+     find_package(FFmpeg 4.3 REQUIRED QUIET COMPONENTS ${FFmpeg_COMPONENTS})
+ endif()
+ 
+@@ -733,7 +756,11 @@
+ # Platform-specific library requirements
+ # ======================================
+ 
+-if (APPLE)
++if (CITRON_IOS)
++    set(PLATFORM_LIBRARIES
++        "-framework Foundation" "-framework CoreVideo" "-framework Metal"
++        "-framework QuartzCore" "-framework IOSurface" "-framework VideoToolbox")
++elseif (APPLE)
+     # Umbrella framework for everything GUI-related
+     find_library(COCOA_LIBRARY Cocoa)
+     set(PLATFORM_LIBRARIES ${COCOA_LIBRARY} ${IOKIT_LIBRARY} ${COREVIDEO_LIBRARY})
+--- a/src/CMakeLists.txt
++++ b/src/CMakeLists.txt
+@@ -278,3 +278,7 @@
+     add_subdirectory(android/app/src/main/jni)
+     target_include_directories(citron-android PRIVATE android/app/src/main)
+ endif()
++
++if (CITRON_IOS)
++    add_subdirectory(ios)
++endif()
+--- a/src/ios/CMakeLists.txt
++++ b/src/ios/CMakeLists.txt
+@@ -1,7 +1,7 @@
+ # SPDX-FileCopyrightText: Copyright 2026 Citron Emulator Project
+ # SPDX-License-Identifier: GPL-2.0-or-later
+ 
+-add_library(citron-ios SHARED
++add_library(citron-ios STATIC
+     emu_window/emu_window.cpp
+     emu_window/emu_window.h
+     jit_icache_callbacks_ios.cpp
+@@ -78,6 +78,7 @@
+         XCODE_ATTRIBUTE_LD_RUNPATH_SEARCH_PATHS "@executable_path/Frameworks"
+         XCODE_ATTRIBUTE_PRODUCT_BUNDLE_IDENTIFIER "${CITRON_IOS_BUNDLE_IDENTIFIER}"
+         XCODE_ATTRIBUTE_SWIFT_VERSION "5.0"
++        XCODE_ATTRIBUTE_SWIFT_OBJC_BRIDGING_HEADER "${CMAKE_CURRENT_SOURCE_DIR}/App/CitronIOSBridge.h"
+         XCODE_ATTRIBUTE_TARGETED_DEVICE_FAMILY "1,2"
+     )
+     if (CITRON_IOS_DEVELOPMENT_TEAM)
+@@ -121,13 +122,4 @@
+         COMMENT "Embedding MoltenVK.framework")
+ endif()
+ 
+-if (TARGET CitronIOS)
+-    add_custom_command(TARGET CitronIOS POST_BUILD
+-        COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_BUNDLE_DIR:CitronIOS>/Frameworks"
+-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+-            "$<TARGET_FILE:citron-ios>"
+-            "$<TARGET_BUNDLE_DIR:CitronIOS>/Frameworks/$<TARGET_FILE_NAME:citron-ios>"
+-        COMMAND /bin/sh "${CMAKE_CURRENT_SOURCE_DIR}/codesign_embedded.sh"
+-            "$<TARGET_BUNDLE_DIR:CitronIOS>/Frameworks/$<TARGET_FILE_NAME:citron-ios>"
+-        COMMENT "Embedding citron-ios native library")
+-endif()
++# citron-ios is linked statically; only MoltenVK.framework is embedded.
+--- a/CMakeModules/dependencies.cmake
++++ b/CMakeModules/dependencies.cmake
+@@ -35,7 +35,7 @@
+ # 2-arg mkdir) so the source build always fails.  Force the pre-built
+ # release artifact download path instead.
+ # On POSIX hosts (Linux, macOS) zic builds correctly; use CPMAddPackage.
+-if (WIN32)
++if (WIN32 OR CITRON_IOS)
+     set(CITRON_DOWNLOAD_TIME_ZONE_DATA ON CACHE BOOL
+         "Use pre-built timezone data (forced ON: host lacks POSIX build tools)"
+         FORCE)
+@@ -61,6 +61,11 @@
+ 
+ if (NOT TARGET Boost::headers)
+     set(BOOST_INCLUDE_LIBRARIES "algorithm;asio;container;context;crc;heap;icl;intrusive;process;range;spirit;test;timer;variant" CACHE STRING "Boost components to build")
++    if (CITRON_IOS)
++        # Process spawning is optional and unavailable to the sandboxed iOS app.
++        set(BOOST_INCLUDE_LIBRARIES "algorithm;asio;container;context;crc;heap;icl;intrusive;range;spirit;timer;variant"
++            CACHE STRING "iOS Boost components" FORCE)
++    endif()
+     set(BOOST_ENABLE_CMAKE ON CACHE BOOL "Enable Boost CMake")
+     set(BUILD_TESTING OFF CACHE BOOL "Disable testing")
+     set(BUILD_SHARED_LIBS OFF CACHE BOOL "Disable shared libs")
+@@ -439,6 +444,12 @@
+ # intrinsics. OpenSSL is built via openssl_build.cmake (CPM).
+ 
+ # ── oaknut (yuzu-mirror fork) — AArch64 only ──────────────────────────────────
++if (CITRON_IOS AND ARCHITECTURE_arm64 AND NOT TARGET merry::oaknut)
++    if (NOT EXISTS "${CMAKE_SOURCE_DIR}/externals/oaknut/CMakeLists.txt")
++        message(FATAL_ERROR "Initialize the pinned Oaknut submodule and apply its candidate patch")
++    endif()
++    add_subdirectory("${CMAKE_SOURCE_DIR}/externals/oaknut" "${CMAKE_BINARY_DIR}/ios-oaknut")
++endif()
+ if (ARCHITECTURE_arm64 AND NOT TARGET merry::oaknut)
+     CPMAddPackage(
+         NAME oaknut
+--- a/externals/nx_tzdb/CMakeLists.txt
++++ b/externals/nx_tzdb/CMakeLists.txt
+@@ -21,7 +21,7 @@
+     set(CAN_BUILD_NX_TZDB false)
+ endif()
+ 
+-if (ANDROID)
++if (ANDROID OR CITRON_IOS)
+     set(CAN_BUILD_NX_TZDB false)
+ elseif (WIN32)
+     # Native Windows builds and MSYS2 builds cannot run the generated host tools.
+--- /dev/null
++++ b/CMakeModules/ios_prebuilt_dependencies.cmake
+@@ -0,0 +1,35 @@
++# SPDX-License-Identifier: GPL-3.0-or-later
++# Archives are built for iPhoneOS by the candidate CI dependency script.
++set(CITRON_IOS_DEPS_PREFIX "" CACHE PATH "Explicit iPhoneOS dependency prefix")
++if (NOT CITRON_IOS_DEPS_PREFIX)
++    message(FATAL_ERROR "Pass CITRON_IOS_DEPS_PREFIX; host macOS archives are unsupported")
++endif()
++set(_ios_ssl "${CITRON_IOS_DEPS_PREFIX}/openssl")
++set(_ios_ffmpeg "${CITRON_IOS_DEPS_PREFIX}/ffmpeg")
++foreach(_required
++        "${_ios_ssl}/include/openssl/ssl.h" "${_ios_ssl}/lib/libcrypto.a"
++        "${_ios_ssl}/lib/libssl.a" "${_ios_ffmpeg}/include/libavcodec/avcodec.h"
++        "${_ios_ffmpeg}/lib/libavfilter.a" "${_ios_ffmpeg}/lib/libswscale.a"
++        "${_ios_ffmpeg}/lib/libswresample.a" "${_ios_ffmpeg}/lib/libavcodec.a"
++        "${_ios_ffmpeg}/lib/libavutil.a")
++    if (NOT EXISTS "${_required}")
++        message(FATAL_ERROR "Missing iPhoneOS dependency: ${_required}")
++    endif()
++endforeach()
++add_library(OpenSSL::Crypto STATIC IMPORTED GLOBAL)
++set_target_properties(OpenSSL::Crypto PROPERTIES
++    IMPORTED_LOCATION "${_ios_ssl}/lib/libcrypto.a"
++    INTERFACE_INCLUDE_DIRECTORIES "${_ios_ssl}/include")
++add_library(OpenSSL::SSL STATIC IMPORTED GLOBAL)
++set_target_properties(OpenSSL::SSL PROPERTIES
++    IMPORTED_LOCATION "${_ios_ssl}/lib/libssl.a"
++    INTERFACE_INCLUDE_DIRECTORIES "${_ios_ssl}/include"
++    INTERFACE_LINK_LIBRARIES OpenSSL::Crypto)
++set(CITRON_FFMPEG_STATIC_DIR "${_ios_ffmpeg}" CACHE PATH "iPhoneOS FFmpeg" FORCE)
++set(FFmpeg_INCLUDE_DIR "${_ios_ffmpeg}/include")
++set(FFmpeg_LIBRARIES
++    "${_ios_ffmpeg}/lib/libavfilter.a" "${_ios_ffmpeg}/lib/libswscale.a"
++    "${_ios_ffmpeg}/lib/libswresample.a" "${_ios_ffmpeg}/lib/libavcodec.a"
++    "${_ios_ffmpeg}/lib/libavutil.a")
++set(FFmpeg_FOUND TRUE)
++set(FFmpeg_LDFLAGS "")

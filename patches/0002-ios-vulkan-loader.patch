@@ -1,0 +1,31 @@
+--- a/src/video_core/vulkan_common/vulkan_library.cpp
++++ b/src/video_core/vulkan_common/vulkan_library.cpp
+@@ -2,6 +2,9 @@
+ // SPDX-License-Identifier: GPL-2.0-or-later
+ 
+ #include <string>
++#if defined(__APPLE__)
++#include <TargetConditionals.h>
++#endif
+ 
+ #include "common/dynamic_library.h"
+ #include "common/fs/path_util.h"
+@@ -19,12 +22,18 @@
+ #else
+     auto library = std::make_shared<Common::DynamicLibrary>();
+ #ifdef __APPLE__
++#if TARGET_OS_IPHONE
++    const auto libmoltenvk_filename =
++        Common::FS::GetBundleDirectory() / "Frameworks/MoltenVK.framework/MoltenVK";
++    const char* library_paths[] = {std::getenv("LIBVULKAN_PATH"), libmoltenvk_filename.c_str()};
++#else
+     const auto libvulkan_filename =
+         Common::FS::GetBundleDirectory() / "Contents/Frameworks/libvulkan.1.dylib";
+     const auto libmoltenvk_filename =
+         Common::FS::GetBundleDirectory() / "Contents/Frameworks/libMoltenVK.dylib";
+     const char* library_paths[] = {std::getenv("LIBVULKAN_PATH"), libvulkan_filename.c_str(),
+                                    libmoltenvk_filename.c_str()};
++#endif
+     // Check if a path to a specific Vulkan library has been specified.
+     for (const auto& library_path : library_paths) {
+         if (library_path && library->Open(library_path)) {

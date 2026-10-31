@@ -1,0 +1,105 @@
+--- a/src/ios/App/CitronBridge.swift
++++ b/src/ios/App/CitronBridge.swift
+@@ -2,60 +2,6 @@
+ // SPDX-License-Identifier: GPL-2.0-or-later
+ 
+ import Foundation
+-
+-typealias CitronLifecycleCallback = @convention(c) (Int32) -> Void
+-
+-@_silgen_name("citron_ios_initialize")
+-private func citron_ios_initialize(_ appDirectory: UnsafePointer<CChar>?)
+-
+-@_silgen_name("citron_ios_set_callbacks")
+-private func citron_ios_set_callbacks(_ started: CitronLifecycleCallback?,
+-                                      _ stopped: CitronLifecycleCallback?)
+-
+-@_silgen_name("citron_ios_set_metal_layer")
+-private func citron_ios_set_metal_layer(_ metalLayer: UnsafeMutableRawPointer?,
+-                                        _ width: Int32,
+-                                        _ height: Int32,
+-                                        _ scale: Float)
+-
+-@_silgen_name("citron_ios_launch_game")
+-private func citron_ios_launch_game(_ filepath: UnsafePointer<CChar>?, _ programIndex: Int32) -> Int32
+-
+-@_silgen_name("citron_ios_pause")
+-private func citron_ios_pause()
+-
+-@_silgen_name("citron_ios_resume")
+-private func citron_ios_resume()
+-
+-@_silgen_name("citron_ios_stop")
+-private func citron_ios_stop()
+-
+-@_silgen_name("citron_ios_shutdown")
+-private func citron_ios_shutdown()
+-
+-@_silgen_name("citron_ios_is_running")
+-private func citron_ios_is_running() -> Bool
+-
+-@_silgen_name("citron_ios_is_paused")
+-private func citron_ios_is_paused() -> Bool
+-
+-@_silgen_name("citron_ios_touch_began")
+-private func citron_ios_touch_began(_ id: Int32, _ x: Float, _ y: Float)
+-
+-@_silgen_name("citron_ios_touch_moved")
+-private func citron_ios_touch_moved(_ id: Int32, _ x: Float, _ y: Float)
+-
+-@_silgen_name("citron_ios_touch_ended")
+-private func citron_ios_touch_ended(_ id: Int32)
+-
+-@_silgen_name("citron_ios_set_button")
+-private func citron_ios_set_button(_ playerIndex: Int32, _ buttonId: Int32, _ pressed: Bool)
+-
+-@_silgen_name("citron_ios_set_stick")
+-private func citron_ios_set_stick(_ playerIndex: Int32, _ stickId: Int32, _ x: Float, _ y: Float)
+-
+-@_silgen_name("citron_ios_jit_available")
+-private func citron_ios_jit_available() -> Bool
+ 
+ enum CitronBridge {
+     static func initialize(appDirectory: String) {
+--- /dev/null
++++ b/src/ios/App/CitronIOSBridge.h
+@@ -0,0 +1,39 @@
++// SPDX-FileCopyrightText: Copyright 2026 Citron Emulator Project
++// SPDX-License-Identifier: GPL-2.0-or-later
++// C-only declarations matching src/ios/native.h. Import into Swift with
++// SWIFT_OBJC_BRIDGING_HEADER instead of assuming the Swift calling convention.
++
++#ifndef CITRON_IOS_SWIFT_BRIDGE_H
++#define CITRON_IOS_SWIFT_BRIDGE_H
++
++#include <stdbool.h>
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++typedef void (*CitronLifecycleCallback)(int result);
++
++void citron_ios_initialize(const char* _Nullable app_directory);
++void citron_ios_set_callbacks(CitronLifecycleCallback _Nullable started,
++                              CitronLifecycleCallback _Nullable stopped);
++void citron_ios_set_metal_layer(void* _Nullable metal_layer, int width, int height, float scale);
++int citron_ios_launch_game(const char* _Nullable filepath, int program_index);
++void citron_ios_pause(void);
++void citron_ios_resume(void);
++void citron_ios_stop(void);
++void citron_ios_shutdown(void);
++bool citron_ios_is_running(void);
++bool citron_ios_is_paused(void);
++void citron_ios_touch_began(int id, float x, float y);
++void citron_ios_touch_moved(int id, float x, float y);
++void citron_ios_touch_ended(int id);
++void citron_ios_set_button(int player_index, int button_id, bool pressed);
++void citron_ios_set_stick(int player_index, int stick_id, float x, float y);
++bool citron_ios_jit_available(void);
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif
