@@ -1,9 +1,10 @@
-Citron iPhoneOS prototype - portable build carrier V5
+Citron iPhoneOS prototype - portable build carrier V6
 
-Status: three Mac attempts completed without an IPA. The third consumed the
-pinned Sirit fix, then stopped because Cubeb compiled macOS-only audio code
-against the iPhoneOS SDK. V5 is a candidate audio integration, not a working
-app claim. Native compile/link, packaging and device tests are still required.
+Status: four Mac attempts completed without an IPA. In the fourth, the real
+Cubeb iOS backend and archive compiled, but the native link probe failed because
+AudioUnit was requested as a standalone framework in the iPhoneOS SDK. V6 links
+iOS through AudioToolbox/CoreFoundation and keeps desktop frameworks on macOS.
+Native compile/link, full app packaging and device tests remain required.
 
 The manual workflow uses a standard macos-26 runner, two compiler processes,
 a 120 minute timeout and the fixed official Citron commit in NOTICE.txt.
@@ -11,7 +12,7 @@ It targets native arm64 iPhoneOS, minimum iOS 17.4, statically links the existin
 iOS frontend, and embeds MoltenVK.framework. The IPA is UNSIGNED and is created
 only after successful app compilation and Mach-O/package inspection.
 
-V5 audio integration:
+V6 audio integration:
 - Fetch the exact Cubeb source recorded by Mozilla for its reviewed iOS fix.
 - Apply the complete official RemoteIO AudioUnit patch, with before/after hashes.
 - Select iOS frameworks and the vendored Speex resampler; keep desktop helpers
@@ -39,5 +40,5 @@ personal data, console firmware, keys or games. Signing, trust, installation
 and real device tests are separate later work. Nothing is installed automatically.
 Artifacts are retained for three days; no release or automatic push is enabled.
 
-Previous attempt: https://github.com/riccardosmith03-ops/rms-citron-ios-lab/actions/runs/41236334485
+Previous attempt: https://github.com/riccardosmith03-ops/rms-citron-ios-lab/actions/runs/41240447539
 Current build status: https://github.com/riccardosmith03-ops/rms-citron-ios-lab/actions

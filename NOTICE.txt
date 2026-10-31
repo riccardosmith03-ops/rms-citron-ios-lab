@@ -55,3 +55,9 @@ are copied into licenses/cubeb/speex-source-with-license-notices for packaging.
 This remains an untested application port. The native compile/link probe is not
 run and does not demonstrate audible output, device changes, microphone input,
 interruptions, or background/foreground recovery on an iPhone.
+
+V6 iPhoneOS framework-link correction:
+  Link native iOS AudioUnit APIs through AudioToolbox and CoreFoundation.
+  Keep AudioUnit, CoreAudio and CoreServices in the macOS-only branch.
+  The official Mozilla AudioUnit source, licenses and all other gates remain
+  unchanged. A native link or audible device result is not yet claimed.
