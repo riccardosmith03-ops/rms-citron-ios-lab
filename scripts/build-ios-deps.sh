@@ -69,5 +69,18 @@ mkdir "$work/build/ffmpeg"
 cp "$work/src/openssl/LICENSE.txt" "$work/licenses/OpenSSL-Apache-2.0.txt"
 cp "$work/src/ffmpeg/COPYING.LGPLv2.1" "$work/licenses/FFmpeg-LGPL-2.1.txt"
 cp "$work/moltenvk/MoltenVK/LICENSE" "$work/licenses/MoltenVK-Apache-2.0.txt"
-find "$work/prefix" -name '*.a' -type f -exec xcrun lipo -verify_arch arm64 '{}' ';'
+# lipo consumes every argument after -verify_arch as an architecture name.
+# Keep input first, and preserve failures from find and each archive check.
+verify_static_archives() {
+    local prefix="$1"
+    find "$prefix" -name '*.a' -type f -print0 | (
+        count=0
+        while IFS= read -r -d '' library; do
+            xcrun lipo "$library" -verify_arch arm64
+            count=$((count + 1))
+        done
+        [[ "$count" -gt 0 ]] || { echo 'No static archives found to verify.' >&2; exit 8; }
+    )
+}
+verify_static_archives "$work/prefix"
 echo "iPhoneOS dependencies built at $work/prefix; runtime compatibility is untested."
