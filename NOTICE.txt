@@ -60,4 +60,19 @@ V6 iPhoneOS framework-link correction:
   Link native iOS AudioUnit APIs through AudioToolbox and CoreFoundation.
   Keep AudioUnit, CoreAudio and CoreServices in the macOS-only branch.
   The official Mozilla AudioUnit source, licenses and all other gates remain
-  unchanged. A native link or audible device result is not yet claimed.
+  unchanged. The fifth attempt passed the native compile/link gate; audible
+  device output and the full application remain unverified.
+
+
+V7 Boost legacy header dependency correction:
+  Boost remains the official 1.87.0 CMake release selected by Citron.
+  Add only an iOS INTERFACE edge from the existing legacy Boost::headers
+  aggregator to the official header-only Boost::numeric_conversion target.
+  Require its real cast.hpp and SHA-256:
+  27b29239caffcc6d022e9241660d54ce9d6a0ed173992fb67b212d4f0f471348.
+  No upstream Boost source, headers, version or component list is changed.
+  Source layout and dependency interfaces:
+  https://github.com/boostorg/numeric_conversion/tree/boost-1.87.0
+  https://github.com/boostorg/date_time/blob/boost-1.87.0/CMakeLists.txt
+  Boost retains the Boost Software License 1.0 and original copyright notices.
+  The fifth failure and audio compile/link evidence are in its public build log.

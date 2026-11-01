@@ -17,6 +17,21 @@ while IFS= read -r patch_name; do
     git -C "$source_dir" apply "$patch_file"
 done < "$project_dir/patches/series.txt"
 
+# Preserve the legacy Boost::headers consumers, including nested numeric_conversion.
+python3 - "$source_dir" <<'PY_BOOST_NUMERIC_INTERFACE'
+import hashlib,pathlib,subprocess,sys
+root=pathlib.Path(sys.argv[1]).resolve(strict=True)
+p=root/'CMakeModules/dependencies.cmake'
+assert not p.is_symlink() and p.resolve(strict=True).is_relative_to(root)
+assert hashlib.sha256(p.read_bytes()).hexdigest()=='b430edfd062d4812851ed344cc491c32deba17727cef208548ccb0c684f3e3c2', 'Unexpected post-series Boost dependency source'
+patch='--- a/CMakeModules/dependencies.cmake\n+++ b/CMakeModules/dependencies.cmake\n@@ -78,6 +78,22 @@\n         get_target_property(_boost_headers_aliased "${_boost_headers_target}" ALIASED_TARGET)\n         if (_boost_headers_aliased)\n             set(_boost_headers_target "${_boost_headers_aliased}")\n+        endif()\n+        if (CITRON_IOS)\n+            # numeric/conversion is nested; expose its complete module interface.\n+            if (NOT TARGET Boost::numeric_conversion)\n+                message(FATAL_ERROR "Pinned Boost numeric_conversion target is missing")\n+            endif()\n+            set(_boost_numeric_cast\n+                "${Boost_SOURCE_DIR}/libs/numeric/conversion/include/boost/numeric/conversion/cast.hpp")\n+            if (NOT EXISTS "${_boost_numeric_cast}")\n+                message(FATAL_ERROR "Pinned Boost numeric_conversion header is missing")\n+            endif()\n+            file(SHA256 "${_boost_numeric_cast}" _boost_numeric_cast_sha256)\n+            if (NOT _boost_numeric_cast_sha256 STREQUAL "27b29239caffcc6d022e9241660d54ce9d6a0ed173992fb67b212d4f0f471348")\n+                message(FATAL_ERROR "Pinned Boost numeric_conversion header SHA256 differs")\n+            endif()\n+            target_link_libraries("${_boost_headers_target}" INTERFACE Boost::numeric_conversion)\n         endif()\n         file(GLOB _boost_header_include_dirs LIST_DIRECTORIES true\n             "${Boost_SOURCE_DIR}/libs/*/include")\n'
+assert hashlib.sha256(patch.encode('utf-8')).hexdigest()=='88cd2e4c5352921483a5ea94c71b24346648ccef0ba171a63299eb081ea8dc6e', 'Embedded Boost dependency patch changed'
+subprocess.run(['git','-c','core.autocrlf=false','-C',str(root),'apply','--check','-'],input=patch.encode('utf-8'),check=True)
+subprocess.run(['git','-c','core.autocrlf=false','-C',str(root),'apply','-'],input=patch.encode('utf-8'),check=True)
+assert hashlib.sha256(p.read_bytes()).hexdigest()=='9d1eff350256fd9f7ccecf739c47b541c539717bacef6949d072fc122a65c3d7', 'Patched Boost dependency source differs'
+print('Pinned Boost numeric_conversion complete interface attached to legacy headers; no Boost version or runtime change.')
+PY_BOOST_NUMERIC_INTERFACE
+
 # Only this small submodule is needed here; CPM otherwise fetches an unpatched copy.
 git -C "$source_dir" submodule update --init --depth=1 -- externals/oaknut
 [[ "$(git -C "$source_dir/externals/oaknut" rev-parse HEAD)" == 94c726ce0338b054eb8cb5ea91de8fe6c19f4392 ]]
