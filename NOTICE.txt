@@ -76,3 +76,14 @@ V7 Boost legacy header dependency correction:
   https://github.com/boostorg/date_time/blob/boost-1.87.0/CMakeLists.txt
   Boost retains the Boost Software License 1.0 and original copyright notices.
   The fifth failure and audio compile/link evidence are in its public build log.
+
+
+V8 iOS touch framebuffer API correction:
+  Use the existing GetFramebufferLayout().width/height accessors for the four
+  touch-bound checks in src/ios/emu_window/emu_window.cpp. Layout is a namespace
+  in the fixed official source, not an object accessor. Preserve original
+  GPL-2.0-or-later notices, surface updates, clipping and touch mapping.
+  API reference at the unchanged official source commit:
+  https://github.com/citron-neo/emulator/blob/c3aa70f81e15ea97ee85b6a9a71cbf75d370851e/src/core/frontend/emu_window.h
+  https://github.com/citron-neo/emulator/blob/c3aa70f81e15ea97ee85b6a9a71cbf75d370851e/src/core/frontend/framebuffer_layout.h
+  This repairs a compiler error. It is not an iPhone runtime result.

@@ -17,6 +17,26 @@ while IFS= read -r patch_name; do
     git -C "$source_dir" apply "$patch_file"
 done < "$project_dir/patches/series.txt"
 
+# Match iOS touch bounds to the pinned frontend framebuffer-layout API.
+python3 - "$source_dir" <<'PY_IOS_WINDOW_LAYOUT_API'
+import hashlib,pathlib,subprocess,sys
+root=pathlib.Path(sys.argv[1]).resolve(strict=True)
+expected_api={'src/core/frontend/emu_window.h': 'b0d2f6244156fe80b65c94e508a41fa81ae5d7214c13babc949706ab0100b3b5', 'src/core/frontend/framebuffer_layout.h': 'fb61473517fcaf093dbaa29ad25d5472d8c65af6fa6a1c7f3d0840c83668baba'}
+for name,digest in expected_api.items():
+ p=root/name
+ assert not p.is_symlink() and p.resolve(strict=True).is_relative_to(root)
+ assert hashlib.sha256(p.read_bytes()).hexdigest()==digest, 'Unexpected pinned framebuffer API: '+name
+p=root/'src/ios/emu_window/emu_window.cpp'
+assert not p.is_symlink() and p.resolve(strict=True).is_relative_to(root)
+assert hashlib.sha256(p.read_bytes()).hexdigest()=='d0170574e314bdd3ce3557ef1f32a839158bb277a8f42d7eaaa4f0f7d6a55619', 'Unexpected post-series iOS window source'
+patch='--- a/src/ios/emu_window/emu_window.cpp\n+++ b/src/ios/emu_window/emu_window.cpp\n@@ -21,16 +21,16 @@\n }\n \n void EmuWindow_IOS::OnTouchPressed(int id, float x, float y) {\n-    const u32 clamped_x = static_cast<u32>(std::clamp(x, 0.0f, static_cast<float>(Layout().ScreenWidth)));\n-    const u32 clamped_y = static_cast<u32>(std::clamp(y, 0.0f, static_cast<float>(Layout().ScreenHeight)));\n+    const u32 clamped_x = static_cast<u32>(std::clamp(x, 0.0f, static_cast<float>(GetFramebufferLayout().width)));\n+    const u32 clamped_y = static_cast<u32>(std::clamp(y, 0.0f, static_cast<float>(GetFramebufferLayout().height)));\n     const auto [touch_x, touch_y] = MapToTouchScreen(clamped_x, clamped_y);\n     IOS::EmulationSession::GetInstance().GetInputSubsystem().GetTouchScreen()->TouchPressed(\n         touch_x, touch_y, id);\n }\n \n void EmuWindow_IOS::OnTouchMoved(int id, float x, float y) {\n-    const u32 clamped_x = static_cast<u32>(std::clamp(x, 0.0f, static_cast<float>(Layout().ScreenWidth)));\n-    const u32 clamped_y = static_cast<u32>(std::clamp(y, 0.0f, static_cast<float>(Layout().ScreenHeight)));\n+    const u32 clamped_x = static_cast<u32>(std::clamp(x, 0.0f, static_cast<float>(GetFramebufferLayout().width)));\n+    const u32 clamped_y = static_cast<u32>(std::clamp(y, 0.0f, static_cast<float>(GetFramebufferLayout().height)));\n     const auto [touch_x, touch_y] = MapToTouchScreen(clamped_x, clamped_y);\n     IOS::EmulationSession::GetInstance().GetInputSubsystem().GetTouchScreen()->TouchMoved(touch_x,\n                                                                                          touch_y,\n'
+assert hashlib.sha256(patch.encode('utf-8')).hexdigest()=='77561bfa3a791bcd8669bb59d995b2cb759993f109d22e3aa3899aa6dba7bdaf', 'Embedded iOS window patch changed'
+subprocess.run(['git','-c','core.autocrlf=false','-C',str(root),'apply','--check','-'],input=patch.encode('utf-8'),check=True)
+subprocess.run(['git','-c','core.autocrlf=false','-C',str(root),'apply','-'],input=patch.encode('utf-8'),check=True)
+assert hashlib.sha256(p.read_bytes()).hexdigest()=='2be6094aeb113196fbf569e46461ab5ff8e113d1ce5c821603766e05561ea190', 'Patched iOS window source differs'
+print('iOS touch bounds now use the pinned framebuffer width/height getter; surface updates and touch mapping preserved.')
+PY_IOS_WINDOW_LAYOUT_API
+
 # Preserve the legacy Boost::headers consumers, including nested numeric_conversion.
 python3 - "$source_dir" <<'PY_BOOST_NUMERIC_INTERFACE'
 import hashlib,pathlib,subprocess,sys
