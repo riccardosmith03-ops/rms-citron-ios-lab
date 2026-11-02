@@ -1,4 +1,8 @@
-Experimental Citron iPhoneOS build carrier. No successful compile or device run is claimed.
+Experimental Citron iPhoneOS build carrier V10 lifecycle candidate.
+V9 was built and installed on an iPhone 11; original homebrew checksum and
+frame progress were verified on device. V10 is not yet built or device-tested.
+A user-supplied Peace Walker NSP loads but shows a black screen so far;
+gameplay remains unverified.
 
 Upstream: https://github.com/citron-neo/emulator
 Pinned commit: c3aa70f81e15ea97ee85b6a9a71cbf75d370851e (2026-10-25)
@@ -16,7 +20,8 @@ Further CPM dependencies and licenses remain governed by the pinned upstream pro
 
 The workflow builds code only. It includes no console firmware, keys, games,
 personal data, signing certificates or account credentials. The output IPA is unsigned.
-Creating the artifact does not prove JIT, GPU, memory or game compatibility on a device.
+The limited V9 homebrew result does not establish general JIT, GPU, memory
+or commercial game compatibility.
 
 V4 Sirit API compatibility patch:
   yuzu-mirror/sirit commit ab75463999f4f3291976b079d42d52ee91eebf3f
@@ -52,16 +57,17 @@ The vendored Speex resampler retains its original authors' copyright notices
 and BSD-style terms. Its source files, including complete embedded notices,
 are copied into licenses/cubeb/speex-source-with-license-notices for packaging.
 
-This remains an untested application port. The native compile/link probe is not
-run and does not demonstrate audible output, device changes, microphone input,
-interruptions, or background/foreground recovery on an iPhone.
+The native audio compile/link probe passed in earlier builds. Cubeb -4
+(NOT_SUPPORTED) from the iOS minimum-latency query uses the existing fallback
+to the real output-stream test. Audible tone, microphone input, interruptions
+and background/foreground recovery remain unverified.
 
 V6 iPhoneOS framework-link correction:
   Link native iOS AudioUnit APIs through AudioToolbox and CoreFoundation.
   Keep AudioUnit, CoreAudio and CoreServices in the macOS-only branch.
   The official Mozilla AudioUnit source, licenses and all other gates remain
-  unchanged. The fifth attempt passed the native compile/link gate; audible
-  device output and the full application remain unverified.
+  unchanged. The fifth attempt passed the native compile/link gate. Current
+  V9 build/device status is summarized above; audible output remains unverified.
 
 
 V7 Boost legacy header dependency correction:
@@ -98,4 +104,24 @@ V9 iOS public content-system initialization correction:
   API header and implementation are checked against the fixed official commit:
   https://github.com/citron-neo/emulator/blob/c3aa70f81e15ea97ee85b6a9a71cbf75d370851e/src/core/hle/service/filesystem/filesystem.h
   https://github.com/citron-neo/emulator/blob/c3aa70f81e15ea97ee85b6a9a71cbf75d370851e/src/core/hle/service/filesystem/filesystem.cpp
-  Keep original GPL-2.0-or-later notices. Compile and runtime remain unverified.
+  Keep original GPL-2.0-or-later notices. The later V9 build and limited
+  homebrew device result are summarized above.
+
+
+V10 Swift lifecycle notification correction:
+  In patch0003, both citronStarted and citronStopped dispatch their existing
+  notification posts asynchronously to the serial main queue. This removes
+  the source-level main-join/worker-notification circular wait in Stop/Restart;
+  it does not claim to resolve every possible native teardown stall.
+  Preserve the existing C ABI bridge/header and GPL-2.0-or-later notices.
+  A failed launch may show a generic stopped error instead of its detailed
+  failure text. Native Stop still joins on main. Build and device testing of
+  this candidate remain pending; dependency/build/packaging files are unchanged.
+
+Original homebrew audio smoke:
+  tests/homebrew-audio/main.c and LICENSE are MIT-licensed original source.
+  The workflow builds and statically checks that source in a pinned disposable
+  container. Its presence does not establish audible tone on an iPhone.
+
+This source carrier and its source-only archive contain no keys, firmware,
+games, credentials, signing material, personal data or private runtime logs.

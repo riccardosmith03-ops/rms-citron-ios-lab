@@ -61,6 +61,24 @@
  
  enum CitronBridge {
      static func initialize(appDirectory: String) {
+@@ -123,11 +69,15 @@
+ }
+ 
+ private func citronStarted(_ result: Int32) {
+-    NotificationCenter.default.post(name: .citronStarted, object: result)
++    DispatchQueue.main.async {
++        NotificationCenter.default.post(name: .citronStarted, object: result)
++    }
+ }
+ 
+ private func citronStopped(_ result: Int32) {
+-    NotificationCenter.default.post(name: .citronStopped, object: result)
++    DispatchQueue.main.async {
++        NotificationCenter.default.post(name: .citronStopped, object: result)
++    }
+ }
+ 
+ extension Notification.Name {
 --- /dev/null
 +++ b/src/ios/App/CitronIOSBridge.h
 @@ -0,0 +1,39 @@

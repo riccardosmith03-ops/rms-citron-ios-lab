@@ -1,36 +1,38 @@
-Citron iPhoneOS prototype - portable build carrier V9
+Citron iPhoneOS prototype - portable build carrier V10 lifecycle candidate
 
-Status: seven Mac attempts completed without an IPA. The seventh passed the
-native audio compile/link probe and the previous Boost and iOS touch checks,
-then failed at src/ios/native.cpp:410: CreateFactories is private and requires
-two arguments. Packaging and IPA upload were skipped. No device execution,
-audible output, JIT, GPU or game compatibility has been verified.
+V9 was built and installed on an iPhone 11. Original homebrew checksum and
+frame progress were verified on device. The user-supplied Peace Walker NSP
+reaches loading but has shown a black screen so far; gameplay is unverified.
+No commercial game or private runtime files are included in this carrier.
 
-V9 changes only that obsolete call to the existing public
-InitializeContentSystem(*vfs) entrypoint. Its default overwrite=true policy
-and the pinned non-Android FS_READY initialization stage are preserved.
-No core access level or signature changes, forced initialization stages,
-new filesystem paths, key handling, or extra System::Initialize calls.
-The pinned API header/implementation, post-series source, patch and result
-are checked by exact hashes. Existing provider setup and launch/stop order
-remain unchanged. This repairs a compiler error; runtime remains untested.
+V10 changes only the two Swift lifecycle notification callbacks in patch0003:
+both started and stopped enqueue their NotificationCenter posts through
+DispatchQueue.main.async. This addresses a source-level circular wait during
+Stop/Restart: main joins the worker while the worker waits to notify main.
+The existing C ABI import/header correction remains intact. This new change
+has not been built or tested on device. Native teardown still joins on main
+and can take time; a failed launch can retain only the generic stopped error.
 
-All V8 touch, V7 Boost and V6 audio integration, dependency pins, licenses,
-runtime/JIT checks, build limits and packaging checks remain unchanged.
-The manual workflow uses a standard macos-26 runner, two compiler processes
-and a 120 minute timeout. Native arm64 iPhoneOS, minimum iOS 17.4; MoltenVK
-is embedded. The IPA is UNSIGNED and created only after successful app
-compilation and Mach-O/package inspection. There is no automatic install.
+Cubeb -4 (NOT_SUPPORTED) from the iOS minimum-latency query is the expected
+unsupported-query fallback to the real output-stream test. Audible tone,
+interruptions and background/foreground audio recovery remain unverified.
+The included MIT-licensed original homebrew smoke is source-only.
+
+All dependency pins, build scripts, workflows, runtime/JIT checks, licenses,
+and packaging gates are unchanged from the current 19-file public baseline.
+Native arm64 iPhoneOS, minimum iOS 17.4, with embedded MoltenVK. The manual
+macos-26 workflow uses two compiler processes and a 120 minute timeout.
+An UNSIGNED IPA is produced only after compilation and package inspection.
+There is no automatic install. V10 build and on-device validation are pending.
 
 Build recipe with fresh empty work directories:
   bash scripts/build-ios-deps.sh /tmp/citron-ios-deps
   bash scripts/build-citron-ios.sh /tmp/fresh-pinned-source /tmp/citron-ios-deps /tmp/citron-ios-build
   python3 scripts/package-ios.py /tmp/citron-ios-build /tmp/citron-ios-deps/licenses dist
 
-This project contains code and licenses without credentials, signing material,
-personal data, console firmware, keys or games. Artifacts are retained for
-three days; no release or automatic push is enabled. Signing, trust,
-installation and real device testing are separate later work.
+This source carrier contains no credentials, signing material, personal data,
+console firmware, keys, games, private logs or runtime files. Preserve COPYING
+and NOTICE.txt. Workflow artifacts are retained for three days; no release
+or automatic push is enabled.
 
-Seventh attempt: https://github.com/riccardosmith03-ops/rms-citron-ios-lab/actions/runs/41358374509
-Current build status: https://github.com/riccardosmith03-ops/rms-citron-ios-lab/actions
+Build status: https://github.com/riccardosmith03-ops/rms-citron-ios-lab/actions
