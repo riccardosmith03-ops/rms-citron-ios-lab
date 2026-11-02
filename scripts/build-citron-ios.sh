@@ -8,6 +8,13 @@ project_dir="$(cd "$(dirname "$0")/.." && pwd)"
 [[ ! -e "$build_dir" ]] || { echo 'Refusing to reuse the build directory.' >&2; exit 3; }
 [[ "$(git -C "$source_dir" rev-parse HEAD)" == c3aa70f81e15ea97ee85b6a9a71cbf75d370851e ]]
 [[ -z "$(git -C "$source_dir" status --porcelain)" ]] || { echo 'Source checkout is not clean.' >&2; exit 4; }
+# Own anonymous guest-backing lazy-zero candidate: exact pinned source only.
+python3 - "$source_dir" <<'PY_IOS_LAZY_ZERO_BEFORE'
+import hashlib,pathlib,sys
+r=pathlib.Path(sys.argv[1])
+assert hashlib.sha256((r/'src/common/host_memory.cpp').read_bytes()).hexdigest()=='58708c10cf1d09a6ed49b41db2811cec294daab0ba53543fcd2a5d94284677f1','Unexpected guest-backing source'
+assert not (r/'src/common/ios_lazy_zero.h').exists(),'Lazy-zero helper already exists'
+PY_IOS_LAZY_ZERO_BEFORE
 while IFS= read -r patch_name; do
     [[ -n "$patch_name" && "$patch_name" != \#* ]] || continue
     [[ "$patch_name" != */* && "$patch_name" == *.patch ]] || exit 5
@@ -16,6 +23,15 @@ while IFS= read -r patch_name; do
     git -C "$source_dir" apply --check "$patch_file"
     git -C "$source_dir" apply "$patch_file"
 done < "$project_dir/patches/series.txt"
+
+# Bind the embedded lazy-zero helper and its owning generic backend before compiling.
+python3 - "$source_dir" <<'PY_IOS_LAZY_ZERO_AFTER'
+import hashlib,pathlib,sys
+r=pathlib.Path(sys.argv[1])
+for name,digest in {'src/common/host_memory.cpp':'47b0545cc70e114b6fbb50ded0772bbf1abf93f68fcd6f21decc833908a688e9','src/common/ios_lazy_zero.h':'115672dc8bb320631fb7dfdf226742358b66ac64d2cbe4211f5ebaa197521b4e'}.items():
+ assert hashlib.sha256((r/name).read_bytes()).hexdigest()==digest,'Unexpected lazy-zero source: '+name
+PY_IOS_LAZY_ZERO_AFTER
+
 
 # Use the pinned public filesystem initialization entrypoint on iOS.
 python3 - "$source_dir" <<'PY_IOS_CONTENT_SYSTEM_API'
@@ -213,6 +229,83 @@ env -u SDKROOT -u IPHONEOS_DEPLOYMENT_TARGET -u CFLAGS -u CXXFLAGS -u CPPFLAGS -
     -I "$source_dir/src" "$project_dir/tests/virtual-buffer-ownership.cpp" \
     -o "$deps/build/ownership-host-test"
 "$deps/build/ownership-host-test"
+
+# Host Mac-owned anonymous mmap semantics only: this is NOT an iOS runtime test.
+cat > "$deps/build/ios-lazy-zero-host.cpp" <<'CPP_IOS_LAZY_ZERO_HOST'
+// Host-owned anonymous memory only. A Mac pass is not an iOS runtime proof.
+#include <cassert>
+#include <cstdint>
+#include <cstdio>
+#include <cstring>
+#include <limits>
+#include <sys/mman.h>
+#include <unistd.h>
+#include "common/ios_lazy_zero.h"
+
+int main() {
+    using Common::IOS::ResetPrivateAnonymousToZero;
+    using Common::IOS::ZeroResetStatus;
+    const int native_page = getpagesize();
+    assert(native_page > 0);
+    const auto page = static_cast<std::size_t>(native_page);
+    const auto size = 5 * page;
+    auto* owned = static_cast<std::uint8_t*>(mmap(
+        nullptr, size, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0));
+    assert(owned != MAP_FAILED && owned != nullptr);
+    std::memset(owned, 0x5A, size);
+
+    // Both edges share host pages with bytes that must remain untouched.
+    const auto offset = page - 3;
+    const auto length = 2 * page + 6;
+    assert(ResetPrivateAnonymousToZero(owned, size, offset, length).Succeeded());
+    for (std::size_t i = 0; i < size; ++i) {
+        assert(owned[i] == ((i >= offset && i < offset + length) ? 0 : 0x5A));
+    }
+
+    // Replacing previously dirty interior pages must produce actual zero bytes.
+    std::memset(owned + page, 0xD3, 2 * page);
+    assert(ResetPrivateAnonymousToZero(owned, size, page, 2 * page).Succeeded());
+    for (std::size_t i = page; i < 3 * page; ++i) assert(owned[i] == 0);
+    assert(owned[offset - 1] == 0x5A && owned[offset + length] == 0x5A);
+
+    // A sub-page request must preserve every byte outside its requested range.
+    std::memset(owned, 0x63, size);
+    assert(ResetPrivateAnonymousToZero(owned, size, 7, 13).Succeeded());
+    for (std::size_t i = 0; i < size; ++i)
+        assert(owned[i] == ((i >= 7 && i < 20) ? 0 : 0x63));
+
+    // Zero length includes the one-past-end position and must not clear data.
+    assert(ResetPrivateAnonymousToZero(owned, size, 0, 0).Succeeded());
+    assert(ResetPrivateAnonymousToZero(owned, size, size, 0).Succeeded());
+    assert(owned[0] == 0x63 && owned[size - 1] == 0x63);
+
+    // Rejected bounds are tested only against our valid owned mapping.
+    assert(ResetPrivateAnonymousToZero(owned, size, size + 1, 0).status ==
+           ZeroResetStatus::InvalidRange);
+    assert(ResetPrivateAnonymousToZero(owned, size, size, 1).status ==
+           ZeroResetStatus::InvalidRange);
+    assert(ResetPrivateAnonymousToZero(owned, size, 1,
+           std::numeric_limits<std::size_t>::max()).status == ZeroResetStatus::InvalidRange);
+    assert(ResetPrivateAnonymousToZero(nullptr, size, 0, 0).status ==
+           ZeroResetStatus::InvalidOwner);
+    assert(ResetPrivateAnonymousToZero(owned, std::numeric_limits<std::size_t>::max(),
+           0, 1).status == ZeroResetStatus::InvalidOwner);
+    assert(ResetPrivateAnonymousToZero(owned + 1, size - 1, 0, 1).status ==
+           ZeroResetStatus::InvalidOwner);
+    assert(owned[0] == 0x63 && owned[size - 1] == 0x63);
+
+    assert(ResetPrivateAnonymousToZero(owned, size, 0, size).Succeeded());
+    for (std::size_t i = 0; i < size; ++i) assert(owned[i] == 0);
+    assert(munmap(owned, size) == 0);
+    std::puts("HOST_MAC_ANON_LAZY_ZERO_PASS_NOT_IOS_RUNTIME_PROOF");
+}
+CPP_IOS_LAZY_ZERO_HOST
+env -u SDKROOT -u IPHONEOS_DEPLOYMENT_TARGET -u CFLAGS -u CXXFLAGS -u CPPFLAGS -u LDFLAGS \
+    xcrun --sdk macosx clang++ -std=c++23 -UNDEBUG \
+    -isysroot "$(xcrun --sdk macosx --show-sdk-path)" \
+    -I "$source_dir/src" "$deps/build/ios-lazy-zero-host.cpp" \
+    -o "$deps/build/ios-lazy-zero-host-test"
+"$deps/build/ios-lazy-zero-host-test"
 
 # CPM handles dependencies; these vendored files must still exist in the fixed tree.
 for required in externals/dynarmic/CMakeLists.txt externals/glad/CMakeLists.txt \

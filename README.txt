@@ -36,3 +36,21 @@ and NOTICE.txt. Workflow artifacts are retained for three days; no release
 or automatic push is enabled.
 
 Build status: https://github.com/riccardosmith03-ops/rms-citron-ios-lab/actions
+
+
+LOCAL LAZY-ZERO GUEST-BACKING CANDIDATE — NOT BUILT OR DEVICE TESTED
+The iOS generic backend retains the complete configured guest RAM size and VA
+addresses. Zero initialization replaces only whole host pages inside the owned
+private-anonymous allocation with fresh demand-zero mappings; partial page edges
+are explicitly zeroed. Nonzero fills retain memset. No MADV_FREE/DONTNEED zero
+assumption, fake guest capacity, or file/fastmem/GPU host-pointer alias is used.
+The helper is restricted to the current generic backend with no fastmem arena.
+Future host-pointer GPU imports or new backing aliases require revisiting this
+contract before enabling that backend. Failed MAP_FIXED remaps may leave holes:
+the process prints a fixed phase/errno diagnostic and exits87, with no fallback
+access to the affected range. An initialized guest page still reads as zero.
+The build runs a Mac-owned-anonymous-memory test of edges, interior zero bytes,
+dirty/reclear, bounds and zero length. A Mac pass is not an iOS permission or
+runtime proof. Future device validation must begin with the original homebrew
+and recheck Stop/Restart before a separately observed commercial launch.
+No memory-pressure termination cause or commercial-game compatibility is claimed.

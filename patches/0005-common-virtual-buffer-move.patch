@@ -25,3 +25,162 @@
          alloc_size = std::exchange(other.alloc_size, 0);
          base_ptr = std::exchange(other.base_ptr, nullptr);
          return *this;
+--- a/src/common/host_memory.cpp
++++ b/src/common/host_memory.cpp
+@@ -55,6 +55,11 @@
+ #include "common/host_memory.h"
+ #include "common/logging.h"
+ #include "common/polyfill_thread.h"
++
++#if defined(CITRON_IOS)
++#include <cstdlib>
++#include "common/ios_lazy_zero.h"
++#endif
+ 
+ namespace Common {
+ 
+@@ -1050,6 +1055,37 @@
+         backing_base = backing_buffer.data();
+     }
+ 
++#if defined(CITRON_IOS)
++    // This generic backend owns one private-anonymous allocation. It has no
++    // fastmem aliases or backing FDs. Keep guest capacity and VA addresses intact.
++    void ClearBackingRegion(size_t offset, size_t length, u32 fill_value) {
++        const auto fail_closed = [](IOS::ZeroResetStatus phase, int error) noexcept {
++            char message[112];
++            const int count = std::snprintf(message, sizeof(message),
++                "CITRON_IOS_ZERO_RESET_FATAL phase=%d errno=%d; stopping process\n",
++                static_cast<int>(phase), error);
++            if (count > 0 && static_cast<size_t>(count) < sizeof(message)) {
++                (void)write(STDERR_FILENO, message, static_cast<size_t>(count));
++            }
++            std::_Exit(87);
++        };
++        if (backing_base == nullptr || backing_base != backing_buffer.data() ||
++            offset > backing_buffer.size() ||
++            length > backing_buffer.size() - offset) {
++            fail_closed(IOS::ZeroResetStatus::InvalidRange, ERANGE);
++        }
++        if (static_cast<u8>(fill_value) != 0) {
++            std::memset(backing_base + offset, fill_value, length);
++            return;
++        }
++        const auto result = IOS::ResetPrivateAnonymousToZero(
++            backing_buffer.data(), backing_buffer.size(), offset, length);
++        if (!result.Succeeded()) {
++            fail_closed(result.status, result.native_error);
++        }
++    }
++#endif
++
+     void Map(size_t virtual_offset, size_t host_offset, size_t length, MemoryPermission perm) {}
+ 
+     void Unmap(size_t virtual_offset, size_t length) {}
+@@ -1180,7 +1216,17 @@
+ }
+ 
+ void HostMemory::ClearBackingRegion(size_t physical_offset, size_t length, u32 fill_value) {
++#if defined(CITRON_IOS)
++    if (!impl || virtual_base != nullptr || physical_offset > backing_size ||
++        length > backing_size - physical_offset) {
++        static constexpr char message[] = "CITRON_IOS_ZERO_RESET_FATAL invalid owner/range\n";
++        (void)write(STDERR_FILENO, message, sizeof(message) - 1);
++        std::_Exit(87);
++    }
++    impl->ClearBackingRegion(physical_offset, length, fill_value);
++#else
+     std::memset(backing_base + physical_offset, fill_value, length);
++#endif
+ }
+ 
+ void HostMemory::EnableDirectMappedAddress() {
+--- /dev/null
++++ b/src/common/ios_lazy_zero.h
+@@ -0,0 +1,86 @@
++// SPDX-FileCopyrightText: Copyright 2026 RMS contributors
++// SPDX-License-Identifier: GPL-2.0-or-later
++#pragma once
++
++#include <algorithm>
++#include <cerrno>
++#include <cstddef>
++#include <cstdint>
++#include <cstring>
++#include <limits>
++#include <sys/mman.h>
++#include <unistd.h>
++
++namespace Common::IOS {
++
++enum class ZeroResetStatus : int {
++    Success = 0,
++    InvalidOwner = 1,
++    InvalidRange = 2,
++    InvalidPageSize = 3,
++    RemapFailed = 4,
++    UnexpectedAddress = 5,
++};
++
++struct ZeroResetResult {
++    ZeroResetStatus status;
++    int native_error;
++    bool Succeeded() const noexcept { return status == ZeroResetStatus::Success; }
++};
++
++// Contract: the caller owns this private-anonymous VA allocation, and the
++// requested bytes are exclusively available for initialization. No file,
++// fastmem/GPU host-pointer alias may depend on its old physical pages.
++// Only full host pages wholly inside the requested byte range are replaced.
++// On a remap error the range MUST NOT be used: MAP_FIXED failure may have
++// invalidated the old mapping. The owning iOS caller terminates, never falls back.
++inline ZeroResetResult ResetPrivateAnonymousToZero(void* owned_base, std::size_t owned_size,
++                                                  std::size_t offset,
++                                                  std::size_t length) noexcept {
++    const auto base = reinterpret_cast<std::uintptr_t>(owned_base);
++    if (owned_base == nullptr || owned_size == 0 ||
++        owned_size > std::numeric_limits<std::uintptr_t>::max() - base) {
++        return {ZeroResetStatus::InvalidOwner, EINVAL};
++    }
++    if (offset > owned_size || length > owned_size - offset) {
++        return {ZeroResetStatus::InvalidRange, ERANGE};
++    }
++    if (length == 0) {
++        return {ZeroResetStatus::Success, 0};
++    }
++    const int native_page_size = getpagesize();
++    if (native_page_size <= 0) {
++        return {ZeroResetStatus::InvalidPageSize, EINVAL};
++    }
++    const auto page_size = static_cast<std::size_t>(native_page_size);
++    if (base % page_size != 0) {
++        return {ZeroResetStatus::InvalidOwner, EINVAL};
++    }
++
++    const auto start = base + offset;
++    const auto prefix = std::min(length, (page_size - start % page_size) % page_size);
++    const auto remaining = length - prefix;
++    const auto middle = remaining - remaining % page_size;
++    const auto suffix = remaining - middle;
++    if (prefix != 0) {
++        std::memset(reinterpret_cast<void*>(start), 0, prefix);
++    }
++    if (middle != 0) {
++        void* const expected = reinterpret_cast<void*>(start + prefix);
++        void* const replacement = mmap(expected, middle, PROT_READ | PROT_WRITE,
++                                       MAP_FIXED | MAP_PRIVATE | MAP_ANON, -1, 0);
++        if (replacement == MAP_FAILED) {
++            const int error = errno;
++            return {ZeroResetStatus::RemapFailed, error};
++        }
++        if (replacement != expected) {
++            return {ZeroResetStatus::UnexpectedAddress, EFAULT};
++        }
++    }
++    if (suffix != 0) {
++        std::memset(reinterpret_cast<void*>(start + prefix + middle), 0, suffix);
++    }
++    return {ZeroResetStatus::Success, 0};
++}
++
++} // namespace Common::IOS

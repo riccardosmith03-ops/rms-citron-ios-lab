@@ -125,3 +125,8 @@ Original homebrew audio smoke:
 
 This source carrier and its source-only archive contain no keys, firmware,
 games, credentials, signing material, personal data or private runtime logs.
+
+
+The embedded src/common/ios_lazy_zero.h addition is Copyright2026 RMS contributors,
+GPL-2.0-or-later. The lazy-zero candidate preserves guest RAM capacity and zero
+semantics; it is local source work with no completed iOS runtime validation.
