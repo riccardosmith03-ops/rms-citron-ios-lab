@@ -1,6 +1,6 @@
 --- /dev/null
 +++ b/src/common/ios_render_probe.h
-@@ -0,0 +1,331 @@
+@@ -0,0 +1,336 @@
 +// SPDX-FileCopyrightText: Copyright 2026 RMS contributors
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +#pragma once
@@ -272,7 +272,12 @@
 +        bool valid = true;
 +        const auto append = [&](const char* format, auto... values) {
 +            if (!valid) return;
-+            const int count = std::snprintf(line + used, sizeof(line) - used, format, values...);
++            int count = 0;
++            if constexpr (sizeof...(values) == 0) {
++                count = std::snprintf(line + used, sizeof(line) - used, "%s", format);
++            } else {
++                count = std::snprintf(line + used, sizeof(line) - used, format, values...);
++            }
 +            if (count < 0 || static_cast<std::size_t>(count) >= sizeof(line) - used) valid = false;
 +            else used += static_cast<std::size_t>(count);
 +        };
