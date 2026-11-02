@@ -18,7 +18,6 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     env:
-      RMS_AUDIO_STAGE: ${{ runner.temp }}/rms-homebrew-audio-source-v1
       RMS_AUDIO_IMAGE: devkitpro/devkita64@sha256:82575ea78651b530b2e232bb3799cfd1fe331514e053d5f724bb4b28191fb79d
     steps:
       - name: Checkout the dedicated source project
@@ -28,6 +27,8 @@ jobs:
 
       - name: Stage only the original source and exact reviewed build inputs
         shell: bash
+        env:
+          RMS_AUDIO_STAGE: ${{ runner.temp }}/rms-homebrew-audio-source-v1
         run: |
           set -euo pipefail
           test ! -e "$RMS_AUDIO_STAGE"
@@ -345,6 +346,8 @@ jobs:
 
       - name: Compile libnx and the original smoke inside the pinned disposable container
         shell: bash
+        env:
+          RMS_AUDIO_STAGE: ${{ runner.temp }}/rms-homebrew-audio-source-v1
         run: |
           set -euo pipefail
           test -d "$RMS_AUDIO_STAGE/source" && test -d "$RMS_AUDIO_STAGE/recipe"
