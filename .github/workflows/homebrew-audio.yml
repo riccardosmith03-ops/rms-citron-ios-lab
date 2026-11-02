@@ -1,0 +1,367 @@
+# Proposed EXTRA three-file scope. Local candidate only; not published or dispatched.
+# Original MIT smoke, no ROM/firmware/keys/assets; the generated Switch executable is never run by this job.
+# The reviewed Makefile, container recipe and validator below are exact inline copies.
+name: Original Citron homebrew audio smoke (UNTESTED)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rms-original-homebrew-audio-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build-original-audio-smoke:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      RMS_AUDIO_STAGE: ${{ runner.temp }}/rms-homebrew-audio-source-v1
+      RMS_AUDIO_IMAGE: devkitpro/devkita64@sha256:82575ea78651b530b2e232bb3799cfd1fe331514e053d5f724bb4b28191fb79d
+    steps:
+      - name: Checkout the dedicated source project
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6, same reviewed pin as Citron
+        with:
+          persist-credentials: false
+
+      - name: Stage only the original source and exact reviewed build inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          test ! -e "$RMS_AUDIO_STAGE"
+          mkdir -p "$RMS_AUDIO_STAGE/source/source" "$RMS_AUDIO_STAGE/recipe" "$RMS_AUDIO_STAGE/out"
+          cp -- tests/homebrew-audio/main.c "$RMS_AUDIO_STAGE/source/source/main.c"
+          cp -- tests/homebrew-audio/LICENSE "$RMS_AUDIO_STAGE/source/LICENSE.txt"
+          cat > "$RMS_AUDIO_STAGE/source/Makefile" <<'RMS_AUDIO_MAKEFILE_EXACT'
+          # SPDX-License-Identifier: MIT
+          # Original minimal single-C-source recipe using official libnx switch_rules.
+          .SUFFIXES:
+          ifeq ($(strip $(DEVKITPRO)),)
+          $(error DEVKITPRO must point to an existing, separately approved devkitPro installation)
+          endif
+          include $(DEVKITPRO)/libnx/switch_rules
+          
+          TARGET := rms-citron-audio-smoke
+          BUILD := build
+          ARCH := -march=armv8-a+crc+crypto -mtune=cortex-a57 -mtp=soft -fPIE
+          CFLAGS := -std=gnu11 -O2 -Wall -Wextra -ffunction-sections $(ARCH) $(INCLUDE) -D__SWITCH__
+          LDFLAGS = -specs=$(DEVKITPRO)/libnx/switch.specs $(ARCH) -Wl,-Map,$(OUTPUT).map
+          LIBS := -lnx
+          
+          ifneq ($(BUILD),$(notdir $(CURDIR)))
+          export OUTPUT := $(CURDIR)/$(TARGET)
+          export TOPDIR := $(CURDIR)
+          export VPATH := $(CURDIR)/source
+          export DEPSDIR := $(CURDIR)/$(BUILD)
+          export LD := $(CC)
+          export OFILES := main.o
+          export INCLUDE := -I$(LIBNX)/include -I$(CURDIR)/$(BUILD)
+          export LIBPATHS := -L$(LIBNX)/lib
+          # No RomFS, icon, NACP or data files; elf2nro accepts a plain homebrew NRO.
+          export NROFLAGS :=
+          .PHONY: all $(BUILD)
+          all: $(BUILD)
+          $(BUILD):
+          	@[ -d "$@" ] || mkdir -p "$@"
+          	@$(MAKE) --no-print-directory -C $(BUILD) -f $(CURDIR)/Makefile
+          else
+          .PHONY: all
+          all: $(OUTPUT).nro
+          $(OUTPUT).nro: $(OUTPUT).elf
+          $(OUTPUT).elf: $(OFILES)
+          -include $(OFILES:.o=.d)
+          endif
+          RMS_AUDIO_MAKEFILE_EXACT
+          cat > "$RMS_AUDIO_STAGE/recipe/build-in-container.sh" <<'RMS_AUDIO_CONTAINER_RECIPE_EXACT'
+          #!/usr/bin/env bash
+          # LOCAL RECIPE ONLY: not executed, not part of the approved public carrier.
+          # Future use: inside the official disposable Linux/amd64 devkitPro container.
+          set -euo pipefail
+          test "$#" -eq 3 && test "$1" = --allow-disposable-container-sdk-change || {
+            echo 'usage: build-in-container.sh --allow-disposable-container-sdk-change SOURCE_DIR NEW_OUTPUT_DIR' >&2
+            exit 2
+          }
+          source_dir=$(realpath "$2")
+          output_dir=$(realpath -m "$3")
+          recipe_dir=$(cd "$(dirname "$0")" && pwd)
+          test -d "$source_dir/source" && test -f "$source_dir/Makefile"
+          test ! -e "$output_dir" || { echo 'output must be absent' >&2; exit 2; }
+          test "$(uname -s)" = Linux && test "$(uname -m)" = x86_64
+          test "$(id -u)" -eq 0
+          test "${DEVKITPRO:-}" = /opt/devkitpro
+          test -d /opt/devkitpro/libnx && test -d /opt/devkitpro/devkitA64
+          for command in git make python3 sha256sum elf2nro dkp-pacman; do command -v "$command" >/dev/null; done
+          export PATH="/opt/devkitpro/devkitA64/bin:/opt/devkitpro/tools/bin:$PATH"
+          export DEVKITA64=/opt/devkitpro/devkitA64
+          command -v aarch64-none-elf-gcc >/dev/null
+          # Fail before writes unless the SDK and scratch parent are container-owned.
+          # A source bind mount such as /work is fine; an SDK or /tmp bind mount is not.
+          python3 - "$source_dir" "$output_dir" "$recipe_dir" <<'CONTAINER_GUARD'
+          import os
+          import re
+          import stat
+          import sys
+          from pathlib import Path
+          
+          def require(condition, message):
+              if not condition:
+                  raise SystemExit('container guard: ' + message)
+          
+          marker = Path('/.dockerenv')
+          require(marker.exists() and not marker.is_symlink()
+                  and stat.S_ISREG(marker.stat().st_mode), 'Docker marker absent/invalid')
+          prefix = Path('/opt/devkitpro')
+          libnx = prefix / 'libnx'
+          scratch_parent = Path('/tmp')
+          for path in (Path('/opt'), prefix, libnx, prefix / 'devkitA64', scratch_parent):
+              require(path.is_dir() and not path.is_symlink() and path.resolve() == path,
+                      'noncanonical or symlink SDK/scratch directory: ' + str(path))
+          
+          def unescape_mount(text):
+              return re.sub(r'\\([0-7]{3})', lambda m: chr(int(m.group(1), 8)), text)
+          
+          mounts = []
+          for line in Path('/proc/self/mountinfo').read_text().splitlines():
+              left, right = line.split(' - ', 1)
+              mounts.append((Path(unescape_mount(left.split()[4])), right.split()[0]))
+          require(sum(path == Path('/') and fs == 'overlay' for path, fs in mounts) == 1,
+                  'expected a Docker overlay root filesystem')
+          for mount, _ in mounts:
+              if mount == Path('/'):
+                  continue
+              for protected in (prefix, scratch_parent):
+                  require(not (mount == protected or mount in protected.parents
+                               or protected in mount.parents),
+                          'SDK/scratch intersects an external mount: ' + str(mount))
+          for supplied in map(Path, sys.argv[1:]):
+              canonical = supplied.resolve()
+              for protected in (prefix, scratch_parent):
+                  require(not (canonical == protected or canonical in protected.parents
+                               or protected in canonical.parents),
+                          'source/output/recipe overlaps SDK or scratch')
+          require(Path(sys.argv[1]) not in Path(sys.argv[2]).parents,
+                  'output must not be inside the source mount')
+          print('DOCKER_OVERLAY_AND_UNMOUNTED_CANONICAL_SDK_GUARD_PASS')
+          CONTAINER_GUARD
+          mkdir "$output_dir"
+          exec > >(tee "$output_dir/build.log") 2>&1
+          printf '%s\n' 'SOURCE_RECIPE_NOT_RUNTIME_AUDIO_PROOF'
+          printf '%s\n' '913e9712c56ac3a0ad8633b9488a77cc11edc87effcd5d82984db0e00354bd78  source/main.c' \
+            'ab9d65cd418b676e6b3aad215346beb37090768269867eb9b2f322ff924e8e14  Makefile' \
+            'c5db20e2df97a0700e4d1567c665cc2fa339149eb31e6088f21047a35ff30320  LICENSE.txt' \
+            | (cd "$source_dir" && sha256sum --check --strict -)
+          dkp-pacman -Q > "$output_dir/container-packages.txt"
+          aarch64-none-elf-gcc --version > "$output_dir/compiler-version.txt"
+          sha256sum "$(command -v elf2nro)" "$(command -v aarch64-none-elf-gcc)" > "$output_dir/tool-hashes.txt"
+          
+          # This directory exists only in the disposable container, not on the Windows PC.
+          scratch=$(mktemp -d /tmp/rms-audio-build.XXXXXXXX)
+          test "$(realpath "$scratch")" = "$scratch" && test ! -L "$scratch"
+          libnx_commit=7644c9b26099aa2d2145bc72a21ee24190e92085
+          git -c core.autocrlf=false init "$scratch/libnx"
+          git -C "$scratch/libnx" -c core.autocrlf=false fetch --depth=1 \
+            https://github.com/switchbrew/libnx.git "$libnx_commit"
+          git -C "$scratch/libnx" -c core.autocrlf=false checkout --detach FETCH_HEAD
+          test "$(git -C "$scratch/libnx" rev-parse HEAD)" = "$libnx_commit"
+          test -z "$(git -C "$scratch/libnx" status --porcelain)"
+          printf '%s\n' "$libnx_commit" > "$output_dir/libnx-commit.txt"
+          
+          # Keep the image's original copy; install into an absent prefix so headers,
+          # switch_rules/specs/linker script and libnx.a all come from the same pinned tree.
+          test ! -e "$scratch/image-libnx-not-used"
+          mv -- /opt/devkitpro/libnx "$scratch/image-libnx-not-used"
+          make -C "$scratch/libnx" -j2 install
+          cmp "$scratch/libnx/nx/lib/libnx.a" /opt/devkitpro/libnx/lib/libnx.a
+          cmp "$scratch/libnx/nx/switch_rules" /opt/devkitpro/libnx/switch_rules
+          sha256sum /opt/devkitpro/libnx/lib/libnx.a > "$output_dir/libnx-built-hash.txt"
+          cp "$scratch/libnx/LICENSE.md" "$output_dir/libnx-LICENSE.md"
+          
+          # Source is mounted read-only. Compile a new copy; never edit the reviewed source.
+          mkdir "$scratch/smoke" "$scratch/smoke/source"
+          cp "$source_dir/source/main.c" "$scratch/smoke/source/main.c"
+          cp "$source_dir/Makefile" "$scratch/smoke/Makefile"
+          make -C "$scratch/smoke" -j2
+          name=rms-citron-audio-smoke
+          cp "$scratch/smoke/$name.elf" "$scratch/smoke/$name.nro" \
+            "$scratch/smoke/$name.map" "$output_dir/"
+          cp "$source_dir/LICENSE.txt" "$output_dir/original-smoke-LICENSE.txt"
+          aarch64-none-elf-readelf -h -l -S -s "$output_dir/$name.elf" > "$output_dir/readelf.txt"
+          python3 "$recipe_dir/validate-artifacts.py" "$output_dir/$name.elf" \
+            "$output_dir/$name.nro" > "$output_dir/artifact-validation.json"
+          (cd "$output_dir" && sha256sum "$name.elf" "$name.nro" "$name.map" > SHA256SUMS)
+          printf '%s\n' 'BUILD_AND_STATIC_ARTIFACT_GATES_PASS_NO_RUNTIME_AUDIO_TEST'
+          RMS_AUDIO_CONTAINER_RECIPE_EXACT
+          cat > "$RMS_AUDIO_STAGE/recipe/validate-artifacts.py" <<'RMS_AUDIO_VALIDATOR_EXACT'
+          #!/usr/bin/env python3
+          """Static gate for this original smoke only; does not execute ELF/NRO or audio."""
+          import hashlib
+          import json
+          import struct
+          import sys
+          from pathlib import Path
+          
+          
+          def require(condition, message):
+              if not condition:
+                  raise ValueError(message)
+          
+          
+          def region(blob, offset, size):
+              require(0 <= offset <= len(blob) and 0 <= size <= len(blob) - offset,
+                      "file region out of bounds")
+              return blob[offset:offset + size]
+          
+          
+          def main():
+              require(len(sys.argv) == 3, "usage: validate-artifacts.py ELF NRO")
+              elf_path, nro_path = map(Path, sys.argv[1:])
+              elf, nro = elf_path.read_bytes(), nro_path.read_bytes()
+              require(region(elf, 0, 7) == b"\x7fELF\x02\x01\x01", "not ELF64 little endian")
+              header = struct.unpack("<16sHHIQQQIHHHHHH", region(elf, 0, 64))
+              _, elf_type, machine, version, _, phoff, shoff, _, ehsize, phentsize, phnum, shentsize, shnum, _ = header
+              require(elf_type in (2, 3) and machine == 183 and version == 1,
+                      "expected executable/PIE AArch64 ELF")
+              require(ehsize == 64 and phentsize == 56 and shentsize == 64, "unexpected ELF sizes")
+              programs = [struct.unpack("<IIQQQQQQ", region(elf, phoff + i * phentsize, 56))
+                          for i in range(phnum)]
+              sections = [struct.unpack("<IIQQQQIIQQ", region(elf, shoff + i * shentsize, 64))
+                          for i in range(shnum)]
+              loads = [p for p in programs if p[0] == 1]
+              require(len(loads) == 3, "expected three NRO load segments")
+              require(all(p[5] <= p[6] for p in loads), "ELF file extent exceeds memory extent")
+              symbols = {}
+              for section in sections:
+                  if section[1] != 2:  # SHT_SYMTAB: keep the unstripped ELF as evidence.
+                      continue
+                  require(section[9] == 24 and section[5] % 24 == 0, "bad symbol table")
+                  require(section[6] < len(sections), "bad string table index")
+                  strings_section = sections[section[6]]
+                  strings = region(elf, strings_section[4], strings_section[5])
+                  for offset in range(section[4], section[4] + section[5], 24):
+                      name_offset, info, _, section_index, value, size = struct.unpack(
+                          "<IBBHQQ", region(elf, offset, 24))
+                      require(name_offset < len(strings), "symbol name outside string table")
+                      name = strings[name_offset:].split(b"\0", 1)[0].decode("utf-8", errors="strict")
+                      if name in ("__nx_heap_size", "pcm") and section_index != 0:
+                          require(name not in symbols, "duplicate required symbol")
+                          symbols[name] = (info, section_index, value, size)
+              require(set(symbols) == {"__nx_heap_size", "pcm"}, "required symbols absent")
+          
+              def writable_object(name):
+                  info, section_index, address, size = symbols[name]
+                  require(info & 0xF == 1 and 0 < section_index < len(sections),
+                          "required symbol is not a defined ELF object: " + name)
+                  section = sections[section_index]
+                  relative = address - section[3]
+                  require(section[2] & 3 == 3 and 0 <= relative <= section[5] - size,
+                          "required object is outside its allocated writable section: " + name)
+                  data = loads[2]
+                  relative = address - data[3]
+                  require(data[1] & 2 and 0 <= relative <= data[6] - size,
+                          "required object is outside the writable data PT_LOAD: " + name)
+                  return address, size
+          
+              writable_object("__nx_heap_size")
+              writable_object("pcm")
+              heap_info, heap_section_index, heap_address, heap_size = symbols["__nx_heap_size"]
+              require(heap_info >> 4 == 1 and heap_size == 8, "heap override not strong global size_t")
+              require(heap_section_index < len(sections), "bad heap section")
+              heap_section = sections[heap_section_index]
+              heap_relative = heap_address - heap_section[3]
+              require(heap_section[1] != 8 and 0 <= heap_relative <= heap_section[5] - 8,
+                      "heap value not initialized file-backed data")
+              # st_value is the symbol ADDRESS. Read the actual initialized 64-bit value.
+              heap_value = struct.unpack("<Q", region(elf, heap_section[4] + heap_relative, 8))[0]
+              require(heap_value == 0x04000000, "heap request is not 64 MiB")
+              _, _, pcm_address, pcm_size = symbols["pcm"]
+              require(pcm_address % 0x1000 == 0 and pcm_size == 0xA000, "PCM array alignment/size mismatch")
+              require((pcm_address + 0x5000) % 0x1000 == 0, "second PCM row unaligned")
+          
+              # NroStart is 0x10 bytes; official elf2nro's NroHeader follows it.
+              require(region(nro, 0x10, 4) == b"NRO0", "NRO0 magic missing at 0x10")
+              nro_version, nro_size, flags = struct.unpack("<III", region(nro, 0x14, 12))
+              require(nro_version == 0 and flags == 0, "unexpected NRO version/flags")
+              require(nro_size == len(nro), "plain NRO size mismatch or unexpected asset trailer")
+              segments = []
+              previous_end = 0
+              for i, load in enumerate(loads):
+                  offset, size = struct.unpack("<II", region(nro, 0x20 + i * 8, 8))
+                  expected_size = (load[5] + 0xFFF) & ~0xFFF
+                  require(offset == load[3] and size == expected_size, "ELF/NRO segment mismatch")
+                  require(offset % 0x1000 == 0 and size > 0 and size % 0x1000 == 0,
+                          "NRO segment not page aligned")
+                  require(offset >= previous_end, "NRO segments overlap")
+                  segment = region(nro, offset, size)
+                  payload = region(elf, load[2], load[5])
+                  if i == 0:
+                      require(len(payload) >= 0x80, "ELF text cannot hold the NRO headers")
+                      # elf2nro preserves NroStart at 0x00..0x0F; only 0x10..0x7F is replaced.
+                      require(segment[:0x10] == payload[:0x10], "ELF/NRO start code mismatch")
+                      require(segment[0x80:len(payload)] == payload[0x80:], "ELF/NRO payload mismatch")
+                  else:
+                      require(segment[:len(payload)] == payload, "ELF/NRO payload mismatch")
+                  require(not any(segment[len(payload):]), "nonzero NRO segment padding")
+                  segments.append({"offset": offset, "size": size})
+                  previous_end = offset + size
+              require(segments[0]["offset"] == 0 and previous_end == nro_size,
+                      "unexpected plain NRO extent")
+              bss_size = struct.unpack("<I", region(nro, 0x38, 4))[0]
+              # Match the pinned elf2nro algorithm, including data-page padding before BSS.
+              data_file_extent = (loads[2][5] + 0xFFF) & ~0xFFF
+              expected_bss = (max(loads[2][6] - data_file_extent, 0) + 0xFFF) & ~0xFFF
+              require(bss_size == expected_bss, "NRO BSS extent differs from ELF memory extent")
+              data_memory_end = segments[2]["offset"] + segments[2]["size"] + bss_size
+              for name in ("__nx_heap_size", "pcm"):
+                  address, size = writable_object(name)
+                  require(segments[2]["offset"] <= address <= data_memory_end - size,
+                          "required object is not covered by NRO data/BSS: " + name)
+              print(json.dumps({
+                  "status": "STATIC_GATES_PASS_NOT_EXECUTED",
+                  "elf_sha256": hashlib.sha256(elf).hexdigest(),
+                  "nro_sha256": hashlib.sha256(nro).hexdigest(),
+                  "elf_bytes": len(elf), "nro_bytes": len(nro),
+                  "aarch64": True, "heap_initial_value_bytes": heap_value,
+                  "heap_loader_override_still_possible": True,
+                  "pcm_symbol_address": pcm_address, "pcm_total_bytes": pcm_size,
+                  "pcm_row_stride_bytes": 0x5000, "pcm_row_alignment_bytes": 0x1000,
+                  "nro_segments": segments, "nro_bss_bytes": bss_size,
+                  "romfs_nacp_icon_added": False, "runtime_audio_test": False,
+              }, indent=2))
+          
+          
+          if __name__ == "__main__":
+              main()
+          RMS_AUDIO_VALIDATOR_EXACT
+          # These checks bind all readable inline copies to the reviewed local inputs.
+          printf '%s\n' \
+            '913e9712c56ac3a0ad8633b9488a77cc11edc87effcd5d82984db0e00354bd78  source/source/main.c' \
+            'ab9d65cd418b676e6b3aad215346beb37090768269867eb9b2f322ff924e8e14  source/Makefile' \
+            'c5db20e2df97a0700e4d1567c665cc2fa339149eb31e6088f21047a35ff30320  source/LICENSE.txt' \
+            'a2dd24b81d936d617194a231131447b0628b6e14b492ff910bea7223234e014c  recipe/build-in-container.sh' \
+            'b5ddda226ee27158fa3faf5aa7b0727f6542c8784720ba4ec5d49e0175eed290  recipe/validate-artifacts.py' \
+            | (cd "$RMS_AUDIO_STAGE" && sha256sum --check --strict -)
+
+      - name: Compile libnx and the original smoke inside the pinned disposable container
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -d "$RMS_AUDIO_STAGE/source" && test -d "$RMS_AUDIO_STAGE/recipe"
+          test ! -e "$RMS_AUDIO_STAGE/out/result"
+          docker pull --platform linux/amd64 "$RMS_AUDIO_IMAGE"
+          docker image inspect "$RMS_AUDIO_IMAGE" > "$RMS_AUDIO_STAGE/out/container-image-inspect.json"
+          docker run --rm --platform linux/amd64 --network bridge \
+            --mount "type=bind,src=$RMS_AUDIO_STAGE/source,dst=/smoke,readonly" \
+            --mount "type=bind,src=$RMS_AUDIO_STAGE/recipe,dst=/recipe,readonly" \
+            --mount "type=bind,src=$RMS_AUDIO_STAGE/out,dst=/out" \
+            "$RMS_AUDIO_IMAGE" bash /recipe/build-in-container.sh \
+              --allow-disposable-container-sdk-change /smoke /out/result
+
+      - name: Preserve the original smoke and static proof after successful gates
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1, same reviewed pin as Citron
+        with:
+          name: RMS-Citron-original-audio-smoke-STATIC-ONLY
+          path: ${{ runner.temp }}/rms-homebrew-audio-source-v1/out/
+          if-no-files-found: error
+          retention-days: 3
