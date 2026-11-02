@@ -130,3 +130,12 @@ games, credentials, signing material, personal data or private runtime logs.
 The embedded src/common/ios_lazy_zero.h addition is Copyright2026 RMS contributors,
 GPL-2.0-or-later. The lazy-zero candidate preserves guest RAM capacity and zero
 semantics; it is local source work with no completed iOS runtime validation.
+
+
+V12 bounded numeric rendering-stage diagnostics:
+  The embedded common/ios_render_probe.h helper and test additions are Copyright
+  2026 RMS contributors, GPL-2.0-or-later. Existing upstream notices are retained.
+  Only CITRON_IOS hook sites run this optional bounded recorder. No guest names,
+  paths, addresses, memory contents or text are included in its numeric record.
+  This diagnostics-only source change preserves V11 guest backing, lifecycle,
+  JIT, audio, dependency pins and the nineteen-file carrier inventory.

@@ -1,6 +1,549 @@
+--- /dev/null
++++ b/src/common/ios_render_probe.h
+@@ -0,0 +1,331 @@
++// SPDX-FileCopyrightText: Copyright 2026 RMS contributors
++// SPDX-License-Identifier: GPL-2.0-or-later
++#pragma once
++
++// Production callers are compiled only for CITRON_IOS. No guest data is read.
++#include <array>
++#include <atomic>
++#include <chrono>
++#include <condition_variable>
++#include <cstdint>
++#include <cstdio>
++#include <filesystem>
++#include <initializer_list>
++#include <mutex>
++#include <thread>
++#include <fcntl.h>
++#include <sys/stat.h>
++#include <unistd.h>
++
++namespace Common::IOS::RenderProbe {
++using Generation = std::uint64_t;
++using Clock = std::chrono::steady_clock;
++enum class Stage : std::size_t {
++    LaunchSetup, SystemLoad, RunEmulation, SystemRun, GpfifoSubmit, GpuListProcess,
++    QueueBuffer, AcquireFramebuffer, RequestComposite, FencesReady, Composite,
++    GetRenderFrame, Present, FirstFrame, Count
++};
++enum class Counter : std::size_t {
++    QueueSuccess, AcquireSuccess, CompositeFenceTotal, PartialMapChunks, PartialMapPages,
++    UnmappedReadChunks, UnmappedReadBytes, UnmappedWriteChunks, UnmappedWriteBytes,
++    CompositeEmpty, CompositeSkipped, CompositeHidden, Count
++};
++inline constexpr std::size_t StageCount = static_cast<std::size_t>(Stage::Count);
++inline constexpr std::size_t CounterCount = static_cast<std::size_t>(Counter::Count);
++inline constexpr std::uint64_t WindowUs = 30'000'000;
++inline constexpr std::uint64_t IntervalUs = 1'000'000;
++inline constexpr unsigned MaxRecords = 32;
++inline constexpr std::size_t MaxBytes = 128 * 1024;
++inline constexpr const char* FileName = "render-stage-probe.jsonl";
++
++namespace Detail {
++struct Stats {
++    std::atomic<std::uint64_t> enter{}, exit{}, first_enter_us{}, last_enter_us{}, first_exit_us{}, last_exit_us{};
++};
++struct State {
++    std::atomic<bool> enabled{false};
++    std::atomic<Generation> generation{};
++    // Never reset: a delayed failed acquisition may still release its control lease.
++    std::atomic<std::uint64_t> active_scopes{};
++    std::array<Stats, StageCount> stages{};
++    std::array<std::atomic<std::uint64_t>, CounterCount> counters{};
++    Clock::time_point origin{};
++    std::uint64_t window_us = WindowUs;
++};
++inline State state;
++inline thread_local Generation callback_generation = 0;
++inline thread_local bool callback_bound = false;
++inline void Maximum(std::atomic<std::uint64_t>& value, std::uint64_t next) noexcept {
++    auto old = value.load(std::memory_order_relaxed);
++    while (old < next && !value.compare_exchange_weak(old, next, std::memory_order_relaxed)) {}
++}
++inline void First(std::atomic<std::uint64_t>& value, std::uint64_t next) noexcept {
++    auto old = value.load(std::memory_order_relaxed);
++    while ((old == 0 || next < old) &&
++           !value.compare_exchange_weak(old, next, std::memory_order_relaxed)) {}
++}
++inline std::uint64_t ElapsedUs() noexcept {
++    const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
++        Clock::now() - state.origin).count();
++    return elapsed > 0 ? static_cast<std::uint64_t>(elapsed) : 1;
++}
++inline bool InWindow(std::uint64_t elapsed) noexcept {
++    if (elapsed > state.window_us) {
++        // A delayed recorder must not keep clock-reading hooks enabled forever.
++        state.enabled.store(false, std::memory_order_seq_cst);
++        return false;
++    }
++    return state.enabled.load(std::memory_order_seq_cst);
++}
++inline bool Acquire(Generation generation) noexcept {
++    if (generation == 0 || !state.enabled.load(std::memory_order_seq_cst) ||
++        state.generation.load(std::memory_order_seq_cst) != generation) return false;
++    state.active_scopes.fetch_add(1, std::memory_order_seq_cst);
++    // No origin/counter access before this recheck. End disables publication;
++    // Begin refuses reset with an accepted scope still holding a lease.
++    if (!state.enabled.load(std::memory_order_seq_cst) ||
++        state.generation.load(std::memory_order_seq_cst) != generation) {
++        state.active_scopes.fetch_sub(1, std::memory_order_seq_cst);
++        return false;
++    }
++    return true;
++}
++inline void Release() noexcept { state.active_scopes.fetch_sub(1, std::memory_order_seq_cst); }
++} // namespace Detail
++
++inline Generation CaptureGeneration() noexcept {
++    if (Detail::callback_bound) return Detail::callback_generation;
++    if (!Detail::state.enabled.load(std::memory_order_seq_cst)) return 0;
++    return Detail::state.generation.load(std::memory_order_seq_cst);
++}
++// Async work retains its creator's integer generation, including nested hooks.
++// It never owns State memory or holds a lease while waiting to be dispatched.
++class CallbackGeneration final {
++public:
++    explicit CallbackGeneration(Generation value) noexcept
++        : previous{Detail::callback_generation}, was_bound{Detail::callback_bound} {
++        Detail::callback_generation = value;
++        Detail::callback_bound = true;
++    }
++    ~CallbackGeneration() {
++        Detail::callback_generation = previous;
++        Detail::callback_bound = was_bound;
++    }
++    CallbackGeneration(const CallbackGeneration&) = delete;
++    CallbackGeneration& operator=(const CallbackGeneration&) = delete;
++private:
++    Generation previous;
++    bool was_bound;
++};
++class Scope final {
++public:
++    explicit Scope(Stage stage) noexcept : Scope(stage, CaptureGeneration()) {}
++    Scope(Stage stage, Generation generation) noexcept : stage{stage}, generation{generation} {
++        if (static_cast<std::size_t>(stage) >= StageCount || !Detail::Acquire(generation)) return;
++        leased = true;
++        const auto time = Detail::ElapsedUs();
++        if (!Detail::InWindow(time)) { Close(); return; }
++        auto& stats = Detail::state.stages[static_cast<std::size_t>(stage)];
++        stats.enter.fetch_add(1, std::memory_order_relaxed);
++        Detail::First(stats.first_enter_us, time);
++        Detail::Maximum(stats.last_enter_us, time);
++        entered = true;
++    }
++    Scope(const Scope&) = delete;
++    Scope& operator=(const Scope&) = delete;
++    ~Scope() { Close(); }
++    void Close() noexcept {
++        if (!leased) return;
++        if (entered && Detail::state.enabled.load(std::memory_order_seq_cst) &&
++            Detail::state.generation.load(std::memory_order_seq_cst) == generation) {
++            const auto time = Detail::ElapsedUs();
++            if (Detail::InWindow(time)) {
++                auto& stats = Detail::state.stages[static_cast<std::size_t>(stage)];
++                stats.exit.fetch_add(1, std::memory_order_relaxed);
++                Detail::First(stats.first_exit_us, time);
++                Detail::Maximum(stats.last_exit_us, time);
++            }
++        }
++        entered = false;
++        leased = false;
++        Detail::Release();
++    }
++private:
++    Stage stage;
++    Generation generation;
++    bool leased = false;
++    bool entered = false;
++};
++inline void Event(Stage stage, Generation generation) noexcept { Scope scope{stage, generation}; }
++inline void Event(Stage stage) noexcept { Event(stage, CaptureGeneration()); }
++inline void Add(Counter counter, std::uint64_t amount, Generation generation) noexcept {
++    if (static_cast<std::size_t>(counter) >= CounterCount || !Detail::Acquire(generation)) return;
++    if (Detail::InWindow(Detail::ElapsedUs()))
++        Detail::state.counters[static_cast<std::size_t>(counter)].fetch_add(amount,
++                                                                         std::memory_order_relaxed);
++    Detail::Release();
++}
++inline void Add(Counter counter, std::uint64_t amount = 1) noexcept {
++    Add(counter, amount, CaptureGeneration());
++}
++
++class Recorder final {
++public:
++    ~Recorder() { End(); }
++    Recorder() = default;
++    Recorder(const Recorder&) = delete;
++    Recorder& operator=(const Recorder&) = delete;
++    bool Begin(const std::filesystem::path& own_documents_directory) noexcept {
++        return BeginImpl(own_documents_directory, WindowUs, IntervalUs);
++    }
++#if defined(CITRON_RENDER_PROBE_HOST_TEST)
++    bool BeginForHostTest(const std::filesystem::path& directory, std::uint64_t window,
++                         std::uint64_t interval) noexcept {
++        return BeginImpl(directory, window, interval);
++    }
++    unsigned RecordsForHostTest() const noexcept { return records; }
++#endif
++    // Native lifecycle owns serialization. Call only after all instrumented workers
++    // and detached tasks have drained, outside session/GPU/logger/main-queue locks.
++    void End() noexcept {
++        Detail::state.enabled.store(false, std::memory_order_seq_cst);
++        {
++            // Pair predicate mutation with wait_mutex: no check-to-sleep lost wake.
++            std::lock_guard lock{wait_mutex};
++            stop_requested.store(true, std::memory_order_seq_cst);
++        }
++        wake.notify_one();
++        if (worker.joinable()) worker.join();
++        // State is not reset here. Begin additionally refuses any surviving Scope.
++    }
++private:
++    bool BeginImpl(const std::filesystem::path& directory, std::uint64_t window,
++                   std::uint64_t interval) noexcept {
++        auto& state = Detail::state;
++        if (worker.joinable() || state.enabled.load(std::memory_order_seq_cst) ||
++            state.active_scopes.load(std::memory_order_seq_cst) != 0 ||
++            window == 0 || window > WindowUs || interval == 0 || interval > window ||
++            window / interval > 30) return false;
++        const auto old = state.generation.load(std::memory_order_seq_cst);
++        if (old == UINT64_MAX) return false;
++        for (auto& s : state.stages) {
++            s.enter.store(0, std::memory_order_relaxed);
++            s.exit.store(0, std::memory_order_relaxed);
++            s.first_enter_us.store(0, std::memory_order_relaxed);
++            s.last_enter_us.store(0, std::memory_order_relaxed);
++            s.first_exit_us.store(0, std::memory_order_relaxed);
++            s.last_exit_us.store(0, std::memory_order_relaxed);
++        }
++        for (auto& count : state.counters) count.store(0, std::memory_order_relaxed);
++        state.origin = Clock::now();
++        state.window_us = window;
++        state.generation.store(old + 1, std::memory_order_seq_cst);
++        records = 0;
++        bytes = 0;
++        stop_requested.store(false, std::memory_order_seq_cst);
++        state.enabled.store(true, std::memory_order_seq_cst);
++        try {
++            worker = std::thread([this, directory, window, interval] { Run(directory, window, interval); });
++            return true;
++        } catch (...) {
++            state.enabled.store(false, std::memory_order_seq_cst);
++            return false; // Diagnostics must not alter launch success/failure.
++        }
++    }
++    static FILE* Open(const std::filesystem::path& documents) noexcept {
++        // The only production anchor comes from FileManager's own Documents URL.
++        // Never follow app-writable citron/log components or a substituted basename.
++        int dir = open(documents.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
++        if (dir < 0) return nullptr;
++        struct stat info{};
++        if (fstat(dir, &info) != 0 || !S_ISDIR(info.st_mode) || info.st_uid != geteuid()) {
++            close(dir); return nullptr;
++        }
++        for (const char* component : {"citron", "log"}) {
++            const int child = openat(dir, component, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
++            close(dir);
++            if (child < 0) return nullptr;
++            dir = child;
++            if (fstat(dir, &info) != 0 || !S_ISDIR(info.st_mode) || info.st_uid != geteuid()) {
++                close(dir); return nullptr;
++            }
++        }
++        // O_NONBLOCK avoids blocking on a substituted FIFO before fstat rejects it.
++        const int fd = openat(dir, FileName, O_WRONLY | O_CREAT | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK, 0600);
++        close(dir);
++        if (fd < 0) return nullptr;
++        if (fstat(fd, &info) != 0 || !S_ISREG(info.st_mode) || info.st_nlink != 1 ||
++            info.st_uid != geteuid() || fchmod(fd, 0600) != 0 || ftruncate(fd, 0) != 0) {
++            close(fd); return nullptr;
++        }
++        FILE* file = fdopen(fd, "w");
++        if (!file) close(fd);
++        return file;
++    }
++    bool Snapshot(FILE* file, unsigned reason) noexcept {
++        if (records >= MaxRecords) return false;
++        char line[4096];
++        std::size_t used = 0;
++        bool valid = true;
++        const auto append = [&](const char* format, auto... values) {
++            if (!valid) return;
++            const int count = std::snprintf(line + used, sizeof(line) - used, format, values...);
++            if (count < 0 || static_cast<std::size_t>(count) >= sizeof(line) - used) valid = false;
++            else used += static_cast<std::size_t>(count);
++        };
++        const auto load = [](const auto& value) {
++            return static_cast<unsigned long long>(value.load(std::memory_order_relaxed));
++        };
++        append("{\"v\":1,\"g\":%llu,\"t_us\":%llu,\"r\":%u,\"enabled\":%u,\"s\":[",
++               load(Detail::state.generation),
++               static_cast<unsigned long long>(Detail::ElapsedUs()), reason,
++               Detail::state.enabled.load(std::memory_order_seq_cst) ? 1U : 0U);
++        for (std::size_t i = 0; i < StageCount; ++i) {
++            const auto& s = Detail::state.stages[i];
++            append("%s[%llu,%llu,%llu,%llu,%llu,%llu]", i ? "," : "", load(s.enter), load(s.exit),
++                   load(s.first_enter_us), load(s.last_enter_us), load(s.first_exit_us), load(s.last_exit_us));
++        }
++        append("],\"c\":[");
++        for (std::size_t i = 0; i < CounterCount; ++i)
++            append("%s%llu", i ? "," : "", load(Detail::state.counters[i]));
++        append("]}\n");
++        if (!valid || used > MaxBytes - bytes || std::fwrite(line, 1, used, file) != used ||
++            std::fflush(file) != 0) return false;
++        ++records;
++        bytes += used;
++        return true;
++    }
++    void Run(const std::filesystem::path& directory, std::uint64_t window,
++             std::uint64_t interval) noexcept {
++        FILE* file = Open(directory);
++        if (!file) { Detail::state.enabled.store(false, std::memory_order_seq_cst); return; }
++        bool good = Snapshot(file, 0);
++        const auto deadline = Detail::state.origin + std::chrono::microseconds(window);
++        auto next = Detail::state.origin + std::chrono::microseconds(interval);
++        while (good && next < deadline) {
++            std::unique_lock lock{wait_mutex};
++            if (wake.wait_until(lock, next, [this] { return stop_requested.load(std::memory_order_seq_cst); })) break;
++            lock.unlock();
++            if (Clock::now() >= deadline) break;
++            good = Snapshot(file, 1);
++            // Skip missed periods instead of emitting a catch-up burst.
++            next = Clock::now() + std::chrono::microseconds(interval);
++        }
++        if (good && !stop_requested.load(std::memory_order_seq_cst)) {
++            std::unique_lock lock{wait_mutex};
++            wake.wait_until(lock, deadline, [this] { return stop_requested.load(std::memory_order_seq_cst); });
++        }
++        Detail::state.enabled.store(false, std::memory_order_seq_cst);
++        if (good) (void)Snapshot(file, stop_requested.load(std::memory_order_seq_cst) ? 3 : 2);
++        std::fclose(file);
++    }
++    std::thread worker;
++    std::atomic<bool> stop_requested{false};
++    std::mutex wait_mutex;
++    std::condition_variable wake;
++    unsigned records = 0;
++    std::size_t bytes = 0;
++};
++// One instance for the one EmulationSession. Lifecycle entrypoints serialize it.
++inline Recorder recorder;
++} // namespace Common::IOS::RenderProbe
+--- a/src/core/device_memory_manager.inc
++++ b/src/core/device_memory_manager.inc
+@@ -1,6 +1,9 @@
+ // SPDX-FileCopyrightText: Copyright 2023 yuzu Emulator Project
+ // SPDX-License-Identifier: GPL-2.0-or-later
+ 
++#if defined(CITRON_IOS)
++#include "common/ios_render_probe.h"
++#endif
+ #include <atomic>
+ #include <limits>
+ #include <memory>
+@@ -236,6 +239,10 @@
+         impl->multi_dev_address.Register(new_dev, start_id);
+     }
+     if (missing_pages != 0) {
++#if defined(CITRON_IOS)
++        Common::IOS::RenderProbe::Add(Common::IOS::RenderProbe::Counter::PartialMapChunks);
++        Common::IOS::RenderProbe::Add(Common::IOS::RenderProbe::Counter::PartialMapPages, missing_pages);
++#endif
+         static std::atomic<u64> partial_map_count{0};
+         const u64 count = partial_map_count.fetch_add(1, std::memory_order_relaxed) + 1;
+         if (count <= 8 || (count % 256) == 0) {
+@@ -430,6 +437,11 @@
+     WalkBlock(
+         address, size,
+         [&](size_t copy_amount, DAddr current_vaddr) {
++#if defined(CITRON_IOS)
++            Common::IOS::RenderProbe::Add(Common::IOS::RenderProbe::Counter::UnmappedReadChunks);
++            Common::IOS::RenderProbe::Add(Common::IOS::RenderProbe::Counter::UnmappedReadBytes, copy_amount);
++#endif
++
+             const u64 count = unmapped_read_count.fetch_add(1, std::memory_order_relaxed);
+             if (count < 5 || (count % 100 == 0)) {
+                 LOG_ERROR(HW_Memory,
+@@ -452,6 +464,11 @@
+     WalkBlock(
+         address, size,
+         [&](size_t copy_amount, DAddr current_vaddr) {
++#if defined(CITRON_IOS)
++            Common::IOS::RenderProbe::Add(Common::IOS::RenderProbe::Counter::UnmappedWriteChunks);
++            Common::IOS::RenderProbe::Add(Common::IOS::RenderProbe::Counter::UnmappedWriteBytes, copy_amount);
++#endif
++
+             LOG_ERROR(
+                 HW_Memory,
+                 "Unmapped Device WriteBlock @ 0x{:016X} (start address = 0x{:016X}, size = {})",
+@@ -477,6 +494,11 @@
+     WalkBlock(
+         address, size,
+         [&](size_t copy_amount, DAddr current_vaddr) {
++#if defined(CITRON_IOS)
++            Common::IOS::RenderProbe::Add(Common::IOS::RenderProbe::Counter::UnmappedReadChunks);
++            Common::IOS::RenderProbe::Add(Common::IOS::RenderProbe::Counter::UnmappedReadBytes, copy_amount);
++#endif
++
+             if (result.fully_mapped) {
+                 result.first_unmapped_address = current_vaddr;
+             }
+@@ -514,6 +536,11 @@
+     WalkBlock(
+         address, size,
+         [&](size_t copy_amount, DAddr current_vaddr) {
++#if defined(CITRON_IOS)
++            Common::IOS::RenderProbe::Add(Common::IOS::RenderProbe::Counter::UnmappedWriteChunks);
++            Common::IOS::RenderProbe::Add(Common::IOS::RenderProbe::Counter::UnmappedWriteBytes, copy_amount);
++#endif
++
+             if (result.fully_mapped) {
+                 result.first_unmapped_address = current_vaddr;
+             }
+--- a/src/core/hle/service/nvdrv/devices/nvhost_gpu.cpp
++++ b/src/core/hle/service/nvdrv/devices/nvhost_gpu.cpp
+@@ -1,6 +1,9 @@
+ // SPDX-FileCopyrightText: Copyright 2018 yuzu Emulator Project
+ // SPDX-License-Identifier: GPL-2.0-or-later
+ 
++#if defined(CITRON_IOS)
++#include "common/ios_render_probe.h"
++#endif
+ #include <cstring>
+ #include <vector>
+ 
+@@ -310,6 +313,10 @@
+ }
+ 
+ NvResult nvhost_gpu::SubmitGPFIFOImpl(IoctlSubmitGpfifo& params, Tegra::CommandList&& entries) {
++#if defined(CITRON_IOS)
++    Common::IOS::RenderProbe::Scope probe_scope{Common::IOS::RenderProbe::Stage::GpfifoSubmit};
++#endif
++
+     LOG_TRACE(Service_NVDRV, "called, gpfifo={:X}, num_entries={:X}, flags={:X}", params.address,
+               params.num_entries, params.flags.raw);
+ 
+--- a/src/core/hle/service/nvnflinger/buffer_queue_producer.cpp
++++ b/src/core/hle/service/nvnflinger/buffer_queue_producer.cpp
+@@ -4,6 +4,9 @@
+ // Parts of this implementation were based on:
+ // https://cs.android.com/android/platform/superproject/+/android-5.1.1_r38:frameworks/native/libs/gui/BufferQueueProducer.cpp
+ 
++#if defined(CITRON_IOS)
++#include "common/ios_render_probe.h"
++#endif
+ #include "common/assert.h"
+ #include "common/settings.h"
+ #include "core/hle/kernel/k_event.h"
+@@ -433,6 +436,10 @@
+ }
+ 
+ Status BufferQueueProducer::QueueBuffer(s32 slot, const QueueBufferInput& input, QueueBufferOutput* output) {
++#if defined(CITRON_IOS)
++    Common::IOS::RenderProbe::Scope probe_scope{Common::IOS::RenderProbe::Stage::QueueBuffer};
++#endif
++
+     s64 timestamp{};
+     bool is_auto_timestamp{};
+     Common::Rectangle<s32> crop;
+@@ -548,6 +555,9 @@
+         listener_replaced->OnFrameReplaced(item);
+     }
+ 
++#if defined(CITRON_IOS)
++    Common::IOS::RenderProbe::Add(Common::IOS::RenderProbe::Counter::QueueSuccess);
++#endif
+     return Status::NoError;
+ }
+ 
+--- a/src/core/hle/service/nvnflinger/hardware_composer.cpp
++++ b/src/core/hle/service/nvnflinger/hardware_composer.cpp
+@@ -1,6 +1,9 @@
+ // SPDX-FileCopyrightText: Copyright 2024 yuzu Emulator Project
+ // SPDX-License-Identifier: GPL-3.0-or-later
+ 
++#if defined(CITRON_IOS)
++#include "common/ios_render_probe.h"
++#endif
+ #include <boost/container/small_vector.hpp>
+ 
+ #include "core/hle/service/nvdrv/devices/nvdisp_disp0.h"
+@@ -171,6 +174,10 @@
+ }
+ 
+ bool HardwareComposer::TryAcquireFramebufferLocked(Layer& layer, Framebuffer& framebuffer) {
++#if defined(CITRON_IOS)
++    Common::IOS::RenderProbe::Scope probe_scope{Common::IOS::RenderProbe::Stage::AcquireFramebuffer};
++#endif
++
+     // Attempt the update.
+     const auto status = layer.buffer_item_consumer->AcquireBuffer(&framebuffer.item, {}, false);
+     if (status != android::Status::NoError) {
+@@ -181,6 +188,9 @@
+     framebuffer.release_frame_number =
+         NormalizeSwapInterval(nullptr, framebuffer.item.swap_interval);
+     framebuffer.is_acquired = true;
++#if defined(CITRON_IOS)
++    Common::IOS::RenderProbe::Add(Common::IOS::RenderProbe::Counter::AcquireSuccess);
++#endif
+ 
+     return true;
+ }
+--- a/src/ios/emu_window/emu_window.cpp
++++ b/src/ios/emu_window/emu_window.cpp
+@@ -1,6 +1,9 @@
+ // SPDX-FileCopyrightText: Copyright 2026 Citron Emulator Project
+ // SPDX-License-Identifier: GPL-2.0-or-later
+ 
++#if defined(CITRON_IOS)
++#include "common/ios_render_probe.h"
++#endif
+ #include "ios/emu_window/emu_window.h"
+ 
+ #include <algorithm>
+@@ -43,6 +46,9 @@
+ 
+ void EmuWindow_IOS::OnFrameDisplayed() {
+     if (!first_frame) {
++#if defined(CITRON_IOS)
++        Common::IOS::RenderProbe::Event(Common::IOS::RenderProbe::Stage::FirstFrame);
++#endif
+         LOG_INFO(Frontend, "iOS first frame displayed");
+         IOS::EmulationSession::GetInstance().NotifyEmulationStarted();
+         first_frame = true;
+--- a/src/ios/jit_icache_callbacks_ios.cpp
++++ b/src/ios/jit_icache_callbacks_ios.cpp
+@@ -20,7 +20,7 @@
+     std::size_t nbytes;
+ };
+ 
+-__attribute__((used)) __attribute__((visibility("default"))) extern "C" int
++extern "C" __attribute__((used, visibility("default"))) int
+ citron_oaknut_jit_icache_clear(void* ctx)
+ {
+     auto* c = static_cast<CitronOaknutJitCallbackCtx*>(ctx);
+@@ -29,7 +29,7 @@
+ }
+ 
+ // Legacy name; link dynarmic/oaknut object files and the allowlist may reference either symbol.
+-__attribute__((used)) __attribute__((visibility("default"))) extern "C" int
++extern "C" __attribute__((used, visibility("default"))) int
+ citron_oaknut_jit_icache_callback(void* ctx)
+ {
+     auto* c = static_cast<CitronOaknutJitCallbackCtx*>(ctx);
 --- a/src/ios/native.cpp
 +++ b/src/ios/native.cpp
-@@ -5,14 +5,18 @@
+@@ -1,18 +1,25 @@
+ // SPDX-FileCopyrightText: Copyright 2026 Citron Emulator Project
+ // SPDX-License-Identifier: GPL-2.0-or-later
+ 
++#if defined(CITRON_IOS)
++#include "common/ios_render_probe.h"
++#endif
+ #include "ios/native.h"
  
  #include <algorithm>
  #include <cstdlib>
@@ -19,7 +562,124 @@
  #    if TARGET_OS_IPHONE
  #        include <dlfcn.h>
  #        include <mach-o/dyld.h>
-@@ -632,10 +636,9 @@
+@@ -232,6 +239,9 @@
+ namespace IOS {
+ namespace {
+ EmulationSession instance;
++#if defined(CITRON_IOS)
++std::filesystem::path probe_documents_directory;
++#endif
+ 
+ std::string SafeString(const char* value) {
+     return value ? std::string{value} : std::string{};
+@@ -325,6 +335,10 @@
+         return;
+     }
+ 
++#if defined(CITRON_IOS)
++    // Exact FileManager Documents anchor, independent of configurable/fallback paths.
++    probe_documents_directory = std::filesystem::path{app_directory};
++#endif
+     Common::FS::SetAppDirectory(app_directory);
+     ConfigureIOSAppDirectories(app_directory);
+     Common::Log::Initialize();
+@@ -439,7 +453,12 @@
+         .launch_type = Service::AM::LaunchType::FrontendInitiated,
+         .program_index = static_cast<s32>(program_index),
+     };
++    {
++#if defined(CITRON_IOS)
++    Common::IOS::RenderProbe::Scope probe_load{Common::IOS::RenderProbe::Stage::SystemLoad};
++#endif
+     load_result = system.Load(*window, filepath, params);
++    }
+     if (load_result != Core::SystemResultStatus::Success) {
+         return load_result;
+     }
+@@ -452,10 +471,17 @@
+ Core::SystemResultStatus EmulationSession::Launch(const std::string& filepath,
+                                                   std::size_t program_index) {
+     Stop();
++#if defined(CITRON_IOS)
++    (void)Common::IOS::RenderProbe::recorder.Begin(probe_documents_directory);
++    Common::IOS::RenderProbe::Scope probe_launch{Common::IOS::RenderProbe::Stage::LaunchSetup};
++#endif
+     InitializeSystem(false);
+ 
+     const auto result = InitializeEmulation(filepath, program_index);
+     if (result != Core::SystemResultStatus::Success) {
++#if defined(CITRON_IOS)
++        probe_launch.Close();
++#endif
+         ShutdownEmulation(result);
+         return result;
+     }
+@@ -471,7 +497,17 @@
+         is_running = false;
+         cv.notify_one();
+     });
++#if defined(CITRON_IOS)
++    const auto probe_generation = Common::IOS::RenderProbe::CaptureGeneration();
++    probe_launch.Close();
++    emulation_thread = std::thread{[this, probe_generation] {
++        Common::IOS::RenderProbe::CallbackGeneration probe_context{probe_generation};
++        RunEmulation();
++    }};
++#endif
++#if !defined(CITRON_IOS)
+     emulation_thread = std::thread{[this] { RunEmulation(); }};
++#endif
+     return result;
+ }
+ 
+@@ -519,6 +555,10 @@
+ }
+ 
+ void EmulationSession::RunEmulation() {
++#if defined(CITRON_IOS)
++    Common::IOS::RenderProbe::Scope probe_run{Common::IOS::RenderProbe::Stage::RunEmulation};
++#endif
++
+     if (is_running && Settings::values.use_disk_shader_cache.GetValue()) {
+         LoadDiskCacheProgress(VideoCore::LoadCallbackStage::Prepare, 0, 0);
+         system.Renderer().ReadRasterizer()->LoadDiskResources(
+@@ -527,6 +567,9 @@
+     }
+ 
+     if (is_running) {
++#if defined(CITRON_IOS)
++        Common::IOS::RenderProbe::Scope probe_system_run{Common::IOS::RenderProbe::Stage::SystemRun};
++#endif
+         void(system.Run());
+     }
+ 
+@@ -541,10 +584,14 @@
+         }
+     }
+ 
++#if defined(CITRON_IOS)
++    probe_run.Close();
++#endif
+     ShutdownEmulation(system.GetExitResult());
+ }
+ 
+ void EmulationSession::ShutdownEmulation(Core::SystemResultStatus result) {
++    {
+     std::scoped_lock lock{mutex};
+     is_running = false;
+     is_paused = false;
+@@ -563,6 +610,10 @@
+     if (on_stopped) {
+         on_stopped(static_cast<int>(result));
+     }
++    } // Release session mutex before joining the bounded recorder.
++#if defined(CITRON_IOS)
++    Common::IOS::RenderProbe::recorder.End();
++#endif
+ }
+ 
+ void EmulationSession::TouchPressed(int id, float x, float y) {
+@@ -632,10 +683,9 @@
  #if defined(__APPLE__) && TARGET_OS_IPHONE
      CitronIosResolveJitWriteProtectPointer();
  #    if !defined(HAS_NCE)
@@ -32,7 +692,7 @@
          return 30;
      }
  #    endif
-@@ -694,48 +697,70 @@
+@@ -694,48 +744,70 @@
                                                            stick_id, x, y);
  }
  
@@ -126,23 +786,193 @@
  #else
  #if defined(MAP_JIT)
      if (CanMakeExecutableMemoryOnWorkerThread(MAP_JIT)) {
---- a/src/ios/jit_icache_callbacks_ios.cpp
-+++ b/src/ios/jit_icache_callbacks_ios.cpp
-@@ -20,7 +20,7 @@
-     std::size_t nbytes;
- };
+--- a/src/video_core/gpu.cpp
++++ b/src/video_core/gpu.cpp
+@@ -1,6 +1,9 @@
+ // SPDX-FileCopyrightText: Copyright 2018 yuzu Emulator Project
+ // SPDX-License-Identifier: GPL-2.0-or-later
  
--__attribute__((used)) __attribute__((visibility("default"))) extern "C" int
-+extern "C" __attribute__((used, visibility("default"))) int
- citron_oaknut_jit_icache_clear(void* ctx)
- {
-     auto* c = static_cast<CitronOaknutJitCallbackCtx*>(ctx);
-@@ -29,7 +29,7 @@
++#if defined(CITRON_IOS)
++#include "common/ios_render_probe.h"
++#endif
+ #include <array>
+ #include <atomic>
+ #include <chrono>
+@@ -324,6 +327,11 @@
+ 
+     void RequestComposite(std::vector<Tegra::FramebufferConfig>&& layers,
+                           std::vector<Service::Nvidia::NvFence>&& fences) {
++#if defined(CITRON_IOS)
++        Common::IOS::RenderProbe::Scope probe_request{Common::IOS::RenderProbe::Stage::RequestComposite};
++        const auto probe_generation = Common::IOS::RenderProbe::CaptureGeneration();
++        Common::IOS::RenderProbe::Add(Common::IOS::RenderProbe::Counter::CompositeFenceTotal, fences.size(), probe_generation);
++#endif
+         size_t num_fences{fences.size()};
+         size_t current_request_counter{};
+         {
+@@ -338,12 +346,31 @@
+             }
+         }
+         const auto wait_fence =
+-            RequestSyncOperation([this, current_request_counter, &layers, &fences, num_fences] {
++            RequestSyncOperation([this, current_request_counter, &layers, &fences, num_fences
++#if defined(CITRON_IOS)
++                                  , probe_generation
++#endif
++                                  ] {
++#if defined(CITRON_IOS)
++                Common::IOS::RenderProbe::CallbackGeneration probe_context{probe_generation};
++#endif
++
+                 auto& syncpoint_manager = host1x.GetSyncpointManager();
+                 if (num_fences == 0) {
++#if defined(CITRON_IOS)
++                    Common::IOS::RenderProbe::Event(Common::IOS::RenderProbe::Stage::FencesReady, probe_generation);
++#endif
+                     renderer->Composite(layers);
+                 }
+-                const auto executer = [this, current_request_counter, layers_copy = layers]() {
++                const auto executer = [this, current_request_counter, layers_copy = layers
++#if defined(CITRON_IOS)
++                                       , probe_generation
++#endif
++                                       ]() {
++#if defined(CITRON_IOS)
++                    Common::IOS::RenderProbe::CallbackGeneration probe_context{probe_generation};
++#endif
++
+                     {
+                         std::unique_lock<std::mutex> lk(request_swap_mutex);
+                         if (--request_swap_counters[current_request_counter] != 0) {
+@@ -351,6 +378,9 @@
+                         }
+                         free_swap_counters.push_back(current_request_counter);
+                     }
++#if defined(CITRON_IOS)
++                    Common::IOS::RenderProbe::Event(Common::IOS::RenderProbe::Stage::FencesReady, probe_generation);
++#endif
+                     renderer->Composite(layers_copy);
+                 };
+                 for (size_t i = 0; i < num_fences; i++) {
+--- a/src/video_core/gpu_thread.cpp
++++ b/src/video_core/gpu_thread.cpp
+@@ -1,6 +1,9 @@
+ // SPDX-FileCopyrightText: Copyright 2019 yuzu Emulator Project
+ // SPDX-License-Identifier: GPL-2.0-or-later
+ 
++#if defined(CITRON_IOS)
++#include "common/ios_render_probe.h"
++#endif
+ #include <chrono>
+ #include <new>
+ #include <thread>
+@@ -63,6 +66,9 @@
+                 if (!have_command) {
+                     scheduler.RetrySuspended(true);
+                 } else if (auto* submit_list = std::get_if<SubmitListCommand>(&next.data)) {
++#if defined(CITRON_IOS)
++                    Common::IOS::RenderProbe::Scope probe_list{Common::IOS::RenderProbe::Stage::GpuListProcess};
++#endif
+                     scheduler.Push(submit_list->channel, std::move(submit_list->entries));
+                 } else if (std::holds_alternative<GPUTickCommand>(next.data)) {
+                     system.GPU().TickWork();
+@@ -119,8 +125,17 @@
+                                 Core::Frontend::GraphicsContext& context,
+                                 Tegra::Control::Scheduler& scheduler) {
+     rasterizer = renderer.ReadRasterizer();
++#if defined(CITRON_IOS)
++    const auto probe_generation = Common::IOS::RenderProbe::CaptureGeneration();
++    thread = std::jthread([this, &renderer, &context, &scheduler, probe_generation](std::stop_token token) {
++        Common::IOS::RenderProbe::CallbackGeneration probe_context{probe_generation};
++        RunThread(token, system, renderer, context, scheduler, state);
++    });
++#endif
++#if !defined(CITRON_IOS)
+     thread = std::jthread(RunThread, std::ref(system), std::ref(renderer), std::ref(context),
+                           std::ref(scheduler), std::ref(state));
++#endif
  }
  
- // Legacy name; link dynarmic/oaknut object files and the allowlist may reference either symbol.
--__attribute__((used)) __attribute__((visibility("default"))) extern "C" int
-+extern "C" __attribute__((used, visibility("default"))) int
- citron_oaknut_jit_icache_callback(void* ctx)
- {
-     auto* c = static_cast<CitronOaknutJitCallbackCtx*>(ctx);
+ void ThreadManager::SubmitList(s32 channel, Tegra::CommandList&& entries) {
+--- a/src/video_core/renderer_vulkan/renderer_vulkan.cpp
++++ b/src/video_core/renderer_vulkan/renderer_vulkan.cpp
+@@ -1,6 +1,9 @@
+ // SPDX-FileCopyrightText: Copyright 2018 yuzu Emulator Project
+ // SPDX-License-Identifier: GPL-2.0-or-later
+ 
++#if defined(CITRON_IOS)
++#include "common/ios_render_probe.h"
++#endif
+ #include <algorithm>
+ #include <array>
+ #include <cstring>
+@@ -152,7 +155,14 @@
+ }
+ 
+ void RendererVulkan::Composite(std::span<const Tegra::FramebufferConfig> framebuffers) {
++#if defined(CITRON_IOS)
++    Common::IOS::RenderProbe::Scope probe_scope{Common::IOS::RenderProbe::Stage::Composite};
++#endif
++
+     if (framebuffers.empty()) {
++#if defined(CITRON_IOS)
++        Common::IOS::RenderProbe::Add(Common::IOS::RenderProbe::Counter::CompositeEmpty);
++#endif
+         return;
+     }
+     if (!present_manager) {
+@@ -164,6 +174,10 @@
+ 
+     // Check if frame should be skipped
+     if (frame_skipping.ShouldSkipFrame(frame_start_time)) {
++#if defined(CITRON_IOS)
++        Common::IOS::RenderProbe::Add(Common::IOS::RenderProbe::Counter::CompositeSkipped);
++#endif
++
+         // Skip rendering but still notify the GPU
+         gpu.RendererFrameEndNotify();
+         rasterizer.TickFrame();
+@@ -177,6 +191,9 @@
+     RenderAppletCaptureLayer(framebuffers);
+ 
+     if (!render_window.IsShown()) {
++#if defined(CITRON_IOS)
++        Common::IOS::RenderProbe::Add(Common::IOS::RenderProbe::Counter::CompositeHidden);
++#endif
+         return;
+     }
+ 
+--- a/src/video_core/renderer_vulkan/vk_present_manager.cpp
++++ b/src/video_core/renderer_vulkan/vk_present_manager.cpp
+@@ -1,6 +1,9 @@
+ // SPDX-FileCopyrightText: Copyright 2023 yuzu Emulator Project
+ // SPDX-License-Identifier: GPL-2.0-or-later
+ 
++#if defined(CITRON_IOS)
++#include "common/ios_render_probe.h"
++#endif
+ #include <array>
+ 
+ #include "common/settings.h"
+@@ -139,6 +142,10 @@
+ PresentManager::~PresentManager() = default;
+ 
+ Frame* PresentManager::GetRenderFrame() {
++#if defined(CITRON_IOS)
++    Common::IOS::RenderProbe::Scope probe_scope{Common::IOS::RenderProbe::Stage::GetRenderFrame};
++#endif
++
+     // Bound the whole Mailbox async pipeline before another frame can enter present_queue. Waiting
+     // here preserves the fences and semaphores of frames that are already rendered or in flight.
+     std::unique_lock lock{free_mutex};
+@@ -160,6 +167,10 @@
+ }
+ 
+ void PresentManager::Present(Frame* frame) {
++#if defined(CITRON_IOS)
++    Common::IOS::RenderProbe::Scope probe_scope{Common::IOS::RenderProbe::Stage::Present};
++#endif
++
+     if (!use_present_thread) {
+         scheduler.WaitWorker();
+         CopyToSwapchain(frame);

@@ -15,6 +15,17 @@ r=pathlib.Path(sys.argv[1])
 assert hashlib.sha256((r/'src/common/host_memory.cpp').read_bytes()).hexdigest()=='58708c10cf1d09a6ed49b41db2811cec294daab0ba53543fcd2a5d94284677f1','Unexpected guest-backing source'
 assert not (r/'src/common/ios_lazy_zero.h').exists(),'Lazy-zero helper already exists'
 PY_IOS_LAZY_ZERO_BEFORE
+# Bind every probe input to the fixed upstream archive.
+python3 - "$source_dir" <<'PY_IOS_RENDER_PROBE_BEFORE'
+import hashlib,pathlib,sys
+r=pathlib.Path(sys.argv[1]).resolve(strict=True)
+assert not (r/'src/common/ios_render_probe.h').exists(),'Render probe already exists'
+for name,digest in {'src/ios/native.cpp': 'f8f0785c8e2cf29daeb90413aa6a1a6a03a4c8d5d953b3437a52a99ad23a9a63', 'src/ios/emu_window/emu_window.cpp': 'd0170574e314bdd3ce3557ef1f32a839158bb277a8f42d7eaaa4f0f7d6a55619', 'src/core/hle/service/nvdrv/devices/nvhost_gpu.cpp': 'c0c993cce4195a5fdd55f37336c7619b4a32596c31055b29d0969b3cd7cf31bf', 'src/video_core/gpu_thread.cpp': '75ff6a99b796c0d9e68c2f1d50b28e38a7b6d662fc6c9a1248ba8177fd9438d6', 'src/core/hle/service/nvnflinger/buffer_queue_producer.cpp': '27364ed5ee8c8498b21812c8323d03e0a07bec15d568051696f82315e3f86844', 'src/core/hle/service/nvnflinger/hardware_composer.cpp': '992b598ed983d54ab321fa5e6efb786addd8b18b3d69e4bcbee774b122b18a88', 'src/video_core/gpu.cpp': 'e64963691c095af20b2ba1b8b816cc84134ac83ac7ba3a083d592f83eda3e616', 'src/video_core/renderer_vulkan/renderer_vulkan.cpp': '4bab97368bafd6523a4351a74efbfa6b466e6342939213c7da38ac7d9e3b879c', 'src/video_core/renderer_vulkan/vk_present_manager.cpp': 'd790f6631b9ac0dde726c89d917df90444f7f6941f853cc8e01ee510f3c09f36', 'src/core/device_memory_manager.inc': '6b0fb8f1114c63646f8c467fa6461788741193fc3e63fbed974c34e83570a538', 'src/ios/jit_icache_callbacks_ios.cpp': '290474791f6d28c6502bbe4c3985ed7c0f01ff3682e15a84fd6903fcd4b2e4d8'}.items():
+ p=r/name
+ assert not p.is_symlink() and p.resolve(strict=True).is_relative_to(r)
+ assert hashlib.sha256(p.read_bytes()).hexdigest()==digest,'Unexpected render-probe source: '+name
+PY_IOS_RENDER_PROBE_BEFORE
+
 while IFS= read -r patch_name; do
     [[ -n "$patch_name" && "$patch_name" != \#* ]] || continue
     [[ "$patch_name" != */* && "$patch_name" == *.patch ]] || exit 5
@@ -23,6 +34,17 @@ while IFS= read -r patch_name; do
     git -C "$source_dir" apply --check "$patch_file"
     git -C "$source_dir" apply "$patch_file"
 done < "$project_dir/patches/series.txt"
+
+# Bind the complete numeric-only probe and hook sources before building.
+python3 - "$source_dir" <<'PY_IOS_RENDER_PROBE_AFTER'
+import hashlib,pathlib,sys
+r=pathlib.Path(sys.argv[1]).resolve(strict=True)
+for name,digest in {'src/ios/native.cpp': '4d7cf88f177aec469c72ed651ed903025494d5aee6a2ed064a29c6e1dd11177e', 'src/ios/emu_window/emu_window.cpp': 'f12d486c2bc2c6744ef4b58fcd68f6b9fa3c13b618cf2d4cce11d3d09291410a', 'src/core/hle/service/nvdrv/devices/nvhost_gpu.cpp': 'b4100833090b1c8069eb56b026de4935e3b9cbd8258f97bc8cf96eb342278308', 'src/video_core/gpu_thread.cpp': '68a0dae863b143765d968598c760193b4f0d034e46590c970faa16b40ca18d14', 'src/core/hle/service/nvnflinger/buffer_queue_producer.cpp': 'a308d2b1f86d40ef0739a0a9043a4b48fe24b20f5c77deb61f47c1253b029b94', 'src/core/hle/service/nvnflinger/hardware_composer.cpp': '16452f72b00f005d5c98abfa24fc2e2bcf8ef9eaa06abfbd5734c57c417efa6d', 'src/video_core/gpu.cpp': 'bf00efab550e4528d07b639a2a886e1f99ee34cfa5910c17a8951c8c2fa885ee', 'src/video_core/renderer_vulkan/renderer_vulkan.cpp': '5fac00a19a35dd09554e7a255257eabeecaef2415a65b9f41c67ab69055a9578', 'src/video_core/renderer_vulkan/vk_present_manager.cpp': '2b9eb2464bc3eb4a4683c0d0b5a9a6522b78efdfaae7da95a22dd24860d83108', 'src/core/device_memory_manager.inc': '9202e645c29abfbf8c0ae81cec8b5445d79b8d84f45ff77219173a3e14772509', 'src/ios/jit_icache_callbacks_ios.cpp': '5a06b39329d23a189fc40fbb454b2b86dd1b6ec117d3a55e5fb2b5ae1c64f939', 'src/common/ios_render_probe.h': '515af9202b1513590f661029c0f875dc0adcb813b0c417ab7ee18f38a1ebcd21'}.items():
+ p=r/name
+ assert not p.is_symlink() and p.resolve(strict=True).is_relative_to(r)
+ assert hashlib.sha256(p.read_bytes()).hexdigest()==digest,'Unexpected render-probe source: '+name
+PY_IOS_RENDER_PROBE_AFTER
+
 
 # Bind the embedded lazy-zero helper and its owning generic backend before compiling.
 python3 - "$source_dir" <<'PY_IOS_LAZY_ZERO_AFTER'
@@ -44,12 +66,12 @@ for name,digest in expected_api.items():
  assert hashlib.sha256(p.read_bytes()).hexdigest()==digest, 'Unexpected pinned filesystem API: '+name
 p=root/'src/ios/native.cpp'
 assert not p.is_symlink() and p.resolve(strict=True).is_relative_to(root)
-assert hashlib.sha256(p.read_bytes()).hexdigest()=='765f6bdc3248935525d76f134535134c3885e2f44a250f70c11a0c6aaa4a09ec', 'Unexpected post-series iOS native source'
+assert hashlib.sha256(p.read_bytes()).hexdigest()=='4d7cf88f177aec469c72ed651ed903025494d5aee6a2ed064a29c6e1dd11177e', 'Unexpected post-series iOS native source'
 patch='--- a/src/ios/native.cpp\n+++ b/src/ios/native.cpp\n@@ -407,7 +407,7 @@\n     system.SetContentProvider(std::make_unique<FileSys::ContentProviderUnion>());\n     system.RegisterContentProvider(FileSys::ContentProviderUnionSlot::FrontendManual,\n                                    manual_provider.get());\n-    system.GetFileSystemController().CreateFactories(*vfs);\n+    system.GetFileSystemController().InitializeContentSystem(*vfs);\n }\n \n Core::SystemResultStatus EmulationSession::InitializeEmulation(const std::string& filepath,\n'
 assert hashlib.sha256(patch.encode('utf-8')).hexdigest()=='2bb101b99ea16a2e8c00d80c9fd0962e12335acfbe7ea438e9b8c5e270146726', 'Embedded iOS content-system patch changed'
 subprocess.run(['git','-c','core.autocrlf=false','-C',str(root),'apply','--check','-'],input=patch.encode('utf-8'),check=True)
 subprocess.run(['git','-c','core.autocrlf=false','-C',str(root),'apply','-'],input=patch.encode('utf-8'),check=True)
-assert hashlib.sha256(p.read_bytes()).hexdigest()=='a9e4d06ea563c939de2bbc7029c8ca7e0475ece1b82a7e64bfea86f5d7394ecf', 'Patched iOS native source differs'
+assert hashlib.sha256(p.read_bytes()).hexdigest()=='fed6ea7cbc37380458ab6a908b9bfb9192d2d0dac7ac0ae03422c206353c444e', 'Patched iOS native source differs'
 print('iOS content initialization now uses the pinned public entrypoint and its default overwrite policy; lifecycle and platform initialization stage preserved.')
 PY_IOS_CONTENT_SYSTEM_API
 
@@ -64,12 +86,12 @@ for name,digest in expected_api.items():
  assert hashlib.sha256(p.read_bytes()).hexdigest()==digest, 'Unexpected pinned framebuffer API: '+name
 p=root/'src/ios/emu_window/emu_window.cpp'
 assert not p.is_symlink() and p.resolve(strict=True).is_relative_to(root)
-assert hashlib.sha256(p.read_bytes()).hexdigest()=='d0170574e314bdd3ce3557ef1f32a839158bb277a8f42d7eaaa4f0f7d6a55619', 'Unexpected post-series iOS window source'
+assert hashlib.sha256(p.read_bytes()).hexdigest()=='f12d486c2bc2c6744ef4b58fcd68f6b9fa3c13b618cf2d4cce11d3d09291410a', 'Unexpected post-series iOS window source'
 patch='--- a/src/ios/emu_window/emu_window.cpp\n+++ b/src/ios/emu_window/emu_window.cpp\n@@ -21,16 +21,16 @@\n }\n \n void EmuWindow_IOS::OnTouchPressed(int id, float x, float y) {\n-    const u32 clamped_x = static_cast<u32>(std::clamp(x, 0.0f, static_cast<float>(Layout().ScreenWidth)));\n-    const u32 clamped_y = static_cast<u32>(std::clamp(y, 0.0f, static_cast<float>(Layout().ScreenHeight)));\n+    const u32 clamped_x = static_cast<u32>(std::clamp(x, 0.0f, static_cast<float>(GetFramebufferLayout().width)));\n+    const u32 clamped_y = static_cast<u32>(std::clamp(y, 0.0f, static_cast<float>(GetFramebufferLayout().height)));\n     const auto [touch_x, touch_y] = MapToTouchScreen(clamped_x, clamped_y);\n     IOS::EmulationSession::GetInstance().GetInputSubsystem().GetTouchScreen()->TouchPressed(\n         touch_x, touch_y, id);\n }\n \n void EmuWindow_IOS::OnTouchMoved(int id, float x, float y) {\n-    const u32 clamped_x = static_cast<u32>(std::clamp(x, 0.0f, static_cast<float>(Layout().ScreenWidth)));\n-    const u32 clamped_y = static_cast<u32>(std::clamp(y, 0.0f, static_cast<float>(Layout().ScreenHeight)));\n+    const u32 clamped_x = static_cast<u32>(std::clamp(x, 0.0f, static_cast<float>(GetFramebufferLayout().width)));\n+    const u32 clamped_y = static_cast<u32>(std::clamp(y, 0.0f, static_cast<float>(GetFramebufferLayout().height)));\n     const auto [touch_x, touch_y] = MapToTouchScreen(clamped_x, clamped_y);\n     IOS::EmulationSession::GetInstance().GetInputSubsystem().GetTouchScreen()->TouchMoved(touch_x,\n                                                                                          touch_y,\n'
 assert hashlib.sha256(patch.encode('utf-8')).hexdigest()=='77561bfa3a791bcd8669bb59d995b2cb759993f109d22e3aa3899aa6dba7bdaf', 'Embedded iOS window patch changed'
 subprocess.run(['git','-c','core.autocrlf=false','-C',str(root),'apply','--check','-'],input=patch.encode('utf-8'),check=True)
 subprocess.run(['git','-c','core.autocrlf=false','-C',str(root),'apply','-'],input=patch.encode('utf-8'),check=True)
-assert hashlib.sha256(p.read_bytes()).hexdigest()=='2be6094aeb113196fbf569e46461ab5ff8e113d1ce5c821603766e05561ea190', 'Patched iOS window source differs'
+assert hashlib.sha256(p.read_bytes()).hexdigest()=='f4a0548477ee521a07be4bc26599cd6837aad4a7059e7f4ca84e33557d5c55f9', 'Patched iOS window source differs'
 print('iOS touch bounds now use the pinned framebuffer width/height getter; surface updates and touch mapping preserved.')
 PY_IOS_WINDOW_LAYOUT_API
 
@@ -306,6 +328,180 @@ env -u SDKROOT -u IPHONEOS_DEPLOYMENT_TARGET -u CFLAGS -u CXXFLAGS -u CPPFLAGS -
     -I "$source_dir/src" "$deps/build/ios-lazy-zero-host.cpp" \
     -o "$deps/build/ios-lazy-zero-host-test"
 "$deps/build/ios-lazy-zero-host-test"
+
+# Bounded render-probe fixtures run only as a HOST Mac process, never on iOS.
+cat > "$deps/build/ios-render-probe-host.cpp" <<'CPP_IOS_RENDER_PROBE_HOST'
+// Host-owned fixtures only; no emulator, device, guest memory or private data.
+#define CITRON_RENDER_PROBE_HOST_TEST 1
+#include "common/ios_render_probe.h"
+#include <cassert>
+#include <fstream>
+#include <string>
+#include <vector>
+using namespace Common::IOS::RenderProbe;
+namespace fs = std::filesystem;
+static std::string Read(const fs::path& path) {
+    std::ifstream input(path);
+    return {std::istreambuf_iterator<char>{input}, std::istreambuf_iterator<char>{}};
+}
+static fs::path Log(const fs::path& documents) { return documents / "citron" / "log"; }
+static void Sentinel(const fs::path& path) { std::ofstream(path) << "sentinel"; }
+int main(int argc, char** argv) {
+    assert(argc == 2);
+    const fs::path root{argv[1]};
+    assert(!fs::exists(root));
+    fs::create_directories(root);
+    const auto directory = [&](const char* leaf) { const auto p = root / leaf; fs::create_directories(Log(p)); return p; };
+    Recorder recorder;
+    auto first = directory("numeric");
+    assert(recorder.Begin(first));
+    const auto generation = CaptureGeneration();
+    assert(generation != 0);
+    std::vector<std::thread> producers;
+    for (int i = 0; i < 4; ++i) producers.emplace_back([generation] {
+        CallbackGeneration context{generation};
+        for (int j = 0; j < 1000; ++j) {
+            Event(Stage::GpfifoSubmit);
+            Add(Counter::QueueSuccess);
+        }
+    });
+    for (auto& producer : producers) producer.join();
+    const auto& stats = Detail::state.stages[static_cast<std::size_t>(Stage::GpfifoSubmit)];
+    assert(stats.enter.load() == 4000 && stats.exit.load() == 4000);
+    assert(stats.first_enter_us.load() > 0 && stats.first_enter_us.load() <= stats.last_enter_us.load());
+    assert(stats.first_exit_us.load() > 0 && stats.first_exit_us.load() <= stats.last_exit_us.load());
+    assert(Detail::state.counters[static_cast<std::size_t>(Counter::QueueSuccess)].load() == 4000);
+    auto end_started = Clock::now();
+    recorder.End(); // Interrupt the otherwise30s private-CV wait.
+    assert(Clock::now() - end_started < std::chrono::seconds(2));
+    assert(fs::file_size(Log(first) / FileName) > 0);
+    struct stat info{};
+    assert(stat((Log(first) / FileName).c_str(), &info) == 0 && (info.st_mode & 0777) == 0600);
+
+    // Ending with a live Scope does not deadlock and cannot permit State reuse.
+    assert(recorder.Begin(directory("live-scope")));
+    const auto stale_generation = CaptureGeneration();
+    Scope held{Stage::RunEmulation};
+    recorder.End();
+    const auto refused = directory("refused");
+    assert(!recorder.Begin(refused) && !fs::exists(Log(refused) / FileName));
+    held.Close(); // A crossing exit is intentionally censored after disable.
+    assert(Detail::state.active_scopes.load() == 0);
+    assert(recorder.Begin(directory("stale-callback")));
+    const auto fresh_generation = CaptureGeneration();
+    assert(fresh_generation > stale_generation);
+    {
+        CallbackGeneration stale{stale_generation};
+        Event(Stage::FirstFrame); // Nested hooks inherit the captured stale epoch.
+        Add(Counter::QueueSuccess);
+        { CallbackGeneration nested{fresh_generation}; Event(Stage::FirstFrame); }
+        assert(CaptureGeneration() == stale_generation);
+    }
+    assert(CaptureGeneration() == fresh_generation);
+    assert(Detail::state.stages[static_cast<std::size_t>(Stage::FirstFrame)].enter.load() == 1);
+    assert(Detail::state.counters[static_cast<std::size_t>(Counter::QueueSuccess)].load() == 0);
+    recorder.End();
+
+    // Race old captured producers against End/next Begin. SC acquisition rechecks
+    // plus the never-reset lease count protect origin/counter reset boundaries.
+    assert(recorder.Begin(directory("race-old")));
+    const auto old_generation = CaptureGeneration();
+    std::atomic<bool> keep_running{true};
+    std::thread old_callback([&] {
+        CallbackGeneration context{old_generation};
+        while (keep_running.load()) { Event(Stage::FirstFrame); Add(Counter::QueueSuccess); }
+    });
+    std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    recorder.End();
+    const auto race_new = directory("race-new");
+    bool started = false;
+    const auto retry_deadline = Clock::now() + std::chrono::seconds(2);
+    while (!started && Clock::now() < retry_deadline) {
+        started = recorder.Begin(race_new);
+        if (!started) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    assert(started);
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    assert(Detail::state.stages[static_cast<std::size_t>(Stage::FirstFrame)].enter.load() == 0);
+    assert(Detail::state.counters[static_cast<std::size_t>(Counter::QueueSuccess)].load() == 0);
+    keep_running.store(false); old_callback.join(); recorder.End();
+
+    assert(recorder.BeginForHostTest(directory("deadline"), 80'000, 10'000));
+    Scope crossing{Stage::GetRenderFrame};
+    const auto disabled_deadline = Clock::now() + std::chrono::seconds(2);
+    while (CaptureGeneration() != 0 && Clock::now() < disabled_deadline)
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    assert(CaptureGeneration() == 0);
+    const auto count = Detail::state.counters[0].load();
+    Event(Stage::FirstFrame); Add(Counter::QueueSuccess);
+    assert(Detail::state.counters[0].load() == count);
+    crossing.Close(); recorder.End();
+    assert(Detail::state.stages[static_cast<std::size_t>(Stage::GetRenderFrame)].exit.load() == 0);
+    assert(recorder.RecordsForHostTest() <= MaxRecords);
+    assert(fs::file_size(Log(root / "deadline") / FileName) <= MaxBytes);
+    assert(!recorder.BeginForHostTest(root, 0, 1));
+    assert(!recorder.BeginForHostTest(root, WindowUs + 1, IntervalUs));
+    assert(!recorder.BeginForHostTest(root, 100, 1)); // Too many planned periods.
+
+    // Reject links/special files BEFORE truncation. All fixtures belong to us.
+    auto symlink_dir = directory("symlink-file");
+    Sentinel(symlink_dir / "target");
+    fs::create_symlink(symlink_dir / "target", Log(symlink_dir) / FileName);
+    assert(recorder.Begin(symlink_dir)); recorder.End();
+    assert(Read(symlink_dir / "target") == "sentinel" && fs::is_symlink(Log(symlink_dir) / FileName));
+    auto hardlink_dir = directory("hardlink-file");
+    Sentinel(hardlink_dir / "target");
+    fs::create_hard_link(hardlink_dir / "target", Log(hardlink_dir) / FileName);
+    assert(recorder.Begin(hardlink_dir)); recorder.End();
+    assert(Read(hardlink_dir / "target") == "sentinel");
+    auto fifo_dir = directory("fifo-file");
+    assert(mkfifo((Log(fifo_dir) / FileName).c_str(), 0600) == 0);
+    assert(recorder.Begin(fifo_dir)); recorder.End();
+    auto real_dir = directory("real-directory");
+    fs::create_directory_symlink(real_dir, root / "symlink-directory");
+    assert(recorder.Begin(root / "symlink-directory")); recorder.End();
+    assert(!fs::exists(Log(real_dir) / FileName));
+    const auto ancestor = root / "symlink-citron";
+    fs::create_directory(ancestor);
+    fs::create_directory_symlink(real_dir / "citron", ancestor / "citron");
+    assert(recorder.Begin(ancestor)); recorder.End();
+    assert(!fs::exists(Log(real_dir) / FileName));
+    const auto log_link = root / "symlink-log";
+    fs::create_directories(log_link / "citron");
+    fs::create_directory_symlink(Log(real_dir), log_link / "citron" / "log");
+    assert(recorder.Begin(log_link)); recorder.End();
+    assert(!fs::exists(Log(real_dir) / FileName));
+    assert(Detail::state.active_scopes.load() == 0);
+    std::puts("HOST_MAC_RENDER_PROBE_PASS_NOT_IOS_RUNTIME_PROOF");
+}
+CPP_IOS_RENDER_PROBE_HOST
+python3 - "$deps/build/ios-render-probe-host.cpp" <<'PY_IOS_RENDER_PROBE_TEST_PIN'
+import hashlib,pathlib,sys
+assert hashlib.sha256(pathlib.Path(sys.argv[1]).read_bytes()).hexdigest()=='00b7d3b644650cb89b2d2ac07d5da0d1777043bbbc2b9cc30d5360c440416fe2'
+PY_IOS_RENDER_PROBE_TEST_PIN
+env -u SDKROOT -u IPHONEOS_DEPLOYMENT_TARGET -u CFLAGS -u CXXFLAGS -u CPPFLAGS -u LDFLAGS     xcrun --sdk macosx clang++ -std=c++23 -UNDEBUG -pthread     -isysroot "$(xcrun --sdk macosx --show-sdk-path)"     -I "$source_dir/src" "$deps/build/ios-render-probe-host.cpp"     -o "$deps/build/ios-render-probe-host-test"
+"$deps/build/ios-render-probe-host-test" "$deps/build/ios-render-probe-fixtures"
+python3 - "$deps/build/ios-render-probe-fixtures" <<'PY_IOS_RENDER_PROBE_SCHEMA'
+import json,pathlib,sys
+root=pathlib.Path(sys.argv[1])
+for leaf in ['numeric','live-scope','stale-callback','race-old','race-new','deadline']:
+ p=root/leaf/'citron/log/render-stage-probe.jsonl'
+ assert p.is_file() and not p.is_symlink() and p.stat().st_nlink==1
+ data=p.read_bytes();assert 0<len(data)<=128*1024
+ lines=data.splitlines();assert 1<=len(lines)<=32
+ for line in lines:
+  obj=json.loads(line);assert set(obj)=={'v','g','t_us','r','enabled','s','c'}
+  assert all(type(obj[k]) is int for k in ['v','g','t_us','r','enabled'])
+  assert obj['v']==1 and obj['g']>0 and obj['t_us']>=0 and obj['r'] in [0,1,2,3] and obj['enabled'] in [0,1]
+  assert len(obj['s'])==14 and len(obj['c'])==12
+  for row in obj['s']:
+   assert len(row)==6 and all(type(x) is int and 0<=x<2**64 for x in row)
+   assert all(x<=30_000_000 for x in row[2:])
+  assert all(type(x) is int and 0<=x<2**64 for x in obj['c'])
+ last=json.loads(lines[-1]);assert last['enabled']==0
+ if leaf=='deadline':assert last['r'] in (2,3) and last['t_us']>=80_000
+print('HOST_MAC_RENDER_PROBE_JSON_SCHEMA_PASS_NOT_IOS_RUNTIME_PROOF')
+PY_IOS_RENDER_PROBE_SCHEMA
 
 # CPM handles dependencies; these vendored files must still exist in the fixed tree.
 for required in externals/dynarmic/CMakeLists.txt externals/glad/CMakeLists.txt \

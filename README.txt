@@ -38,7 +38,7 @@ or automatic push is enabled.
 Build status: https://github.com/riccardosmith03-ops/rms-citron-ios-lab/actions
 
 
-LOCAL LAZY-ZERO GUEST-BACKING CANDIDATE — NOT BUILT OR DEVICE TESTED
+LOCAL LAZY-ZERO GUEST-BACKING CANDIDATE â€” NOT BUILT OR DEVICE TESTED
 The iOS generic backend retains the complete configured guest RAM size and VA
 addresses. Zero initialization replaces only whole host pages inside the owned
 private-anonymous allocation with fresh demand-zero mappings; partial page edges
@@ -54,3 +54,54 @@ dirty/reclear, bounds and zero length. A Mac pass is not an iOS permission or
 runtime proof. Future device validation must begin with the original homebrew
 and recheck Stop/Restart before a separately observed commercial launch.
 No memory-pressure termination cause or commercial-game compatibility is claimed.
+
+
+V12 BOUNDED RENDER DIAGNOSTICS — NOT BUILT OR DEVICE TESTED
+No renderer workaround or compatibility/performance improvement is implemented.
+The iOS build records only fixed numeric stage counters and relative monotonic
+times for up to30seconds per launch. The one recorder writes at most32 explicitly
+fflush'ed snapshots and128KiB to citron/log/render-stage-probe.jsonl. It replaces
+only that regular, singly-linked, own-UID file. The FileManager-provided own Documents
+anchor is retained at initialization; fixed citron and log directory components are
+opened with openat/O_NOFOLLOW and checked for own-UID directories;
+links/special files are refused before truncation. No fsync, per-instruction trace,
+guest data, game name/path, guest/host address or arbitrary diagnostic text is stored.
+I/O/start failures disable diagnostics and do not alter launch results.
+
+Schema v1: v=version; g=monotonic launch generation; t_us=elapsed snapshot time;
+r=0 initial/1 periodic/2 window end/3 native end; enabled=0 or1.
+s holds14 rows [enter,exit,first_enter_us,last_enter_us,first_exit_us,last_exit_us]:
+0LaunchSetup,1SystemLoad,2RunEmulation,3SystemRun,4GpfifoSubmit,5GpuListProcess,
+6QueueBuffer,7AcquireFramebuffer,8RequestComposite,9FencesReady,10Composite,
+11GetRenderFrame,12Present,13FirstFrame. GpuListProcess means a dispatch returned,
+which may suspend at a guest semaphore; it does not mean all GPU work completed.
+RunEmulation normally remains entered while the session runs. FencesReady means
+all guest acquire fences (or zero fences) allowed that composite callback to run.
+c holds12 counters: QueueSuccess,AcquireSuccess,CompositeFenceTotal,
+PartialMapChunks,PartialMapPages,UnmappedReadChunks,UnmappedReadBytes,
+UnmappedWriteChunks,UnmappedWriteBytes,CompositeEmpty,CompositeSkipped,CompositeHidden.
+Missing-device-access counts are copy chunks/bytes, separate from holes found at map
+time. Composite exits and the existing first-frame hook do not prove visible pixels.
+
+Snapshots overlap relaxed counter updates and are approximate, not atomic frame
+histories. Entry/exit differences alone do not establish a stall. Calls crossing
+the30second cutoff have censored exits. Hook timestamps/counter updates are limited
+to that window; recorder scheduling/I/O can delay the final snapshot. Missed periods
+are skipped rather than emitted in a burst. The first late hook also disables further
+hooks, without reading origin/window before an accepted lease. No probing changes
+guest execution.
+
+Start follows the existing Stop/full-worker join. End follows kernel/GPU/CPU/service
+teardown and detached-task drainage; it disables hooks and joins the private-CV
+recorder outside session/GPU/logger locks. State reuse is refused while a captured
+Scope lease survives. The control handshake is sequentially consistent; counters
+stay relaxed. Deferred fence callbacks and owned workers retain their creator's
+generation, including nested hooks, so stale callbacks cannot become a new launch.
+
+The existing Mac build script has host-owned tests for concurrent counters,
+generation/stale callbacks, live-scope reset refusal, prompt interrupted shutdown,
+deadline censoring, numeric schema/size/record bounds and file/link/special-file
+refusal. These tests do not run an emulator or GPU. A Mac test pass is not an iOS
+runtime proof. Future artifact review and separately authorized device validation
+must first recheck the original homebrew, Stop and Restart. No commercial title
+fault cause, playable state, frame output or memory-pressure diagnosis is claimed.
