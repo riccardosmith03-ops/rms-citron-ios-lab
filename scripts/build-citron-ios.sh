@@ -17,6 +17,26 @@ while IFS= read -r patch_name; do
     git -C "$source_dir" apply "$patch_file"
 done < "$project_dir/patches/series.txt"
 
+# Use the pinned public filesystem initialization entrypoint on iOS.
+python3 - "$source_dir" <<'PY_IOS_CONTENT_SYSTEM_API'
+import hashlib,pathlib,subprocess,sys
+root=pathlib.Path(sys.argv[1]).resolve(strict=True)
+expected_api={'src/core/hle/service/filesystem/filesystem.h': '809236450ccbeade9b347eef9e19a13c54d8ae60c45d78aee6631a196c47a826', 'src/core/hle/service/filesystem/filesystem.cpp': '8f42ba0d6e1c17b7c1b9fa1ac23103a1c878e25b643bdd1eede4241745d1f529'}
+for name,digest in expected_api.items():
+ p=root/name
+ assert not p.is_symlink() and p.resolve(strict=True).is_relative_to(root)
+ assert hashlib.sha256(p.read_bytes()).hexdigest()==digest, 'Unexpected pinned filesystem API: '+name
+p=root/'src/ios/native.cpp'
+assert not p.is_symlink() and p.resolve(strict=True).is_relative_to(root)
+assert hashlib.sha256(p.read_bytes()).hexdigest()=='765f6bdc3248935525d76f134535134c3885e2f44a250f70c11a0c6aaa4a09ec', 'Unexpected post-series iOS native source'
+patch='--- a/src/ios/native.cpp\n+++ b/src/ios/native.cpp\n@@ -407,7 +407,7 @@\n     system.SetContentProvider(std::make_unique<FileSys::ContentProviderUnion>());\n     system.RegisterContentProvider(FileSys::ContentProviderUnionSlot::FrontendManual,\n                                    manual_provider.get());\n-    system.GetFileSystemController().CreateFactories(*vfs);\n+    system.GetFileSystemController().InitializeContentSystem(*vfs);\n }\n \n Core::SystemResultStatus EmulationSession::InitializeEmulation(const std::string& filepath,\n'
+assert hashlib.sha256(patch.encode('utf-8')).hexdigest()=='2bb101b99ea16a2e8c00d80c9fd0962e12335acfbe7ea438e9b8c5e270146726', 'Embedded iOS content-system patch changed'
+subprocess.run(['git','-c','core.autocrlf=false','-C',str(root),'apply','--check','-'],input=patch.encode('utf-8'),check=True)
+subprocess.run(['git','-c','core.autocrlf=false','-C',str(root),'apply','-'],input=patch.encode('utf-8'),check=True)
+assert hashlib.sha256(p.read_bytes()).hexdigest()=='a9e4d06ea563c939de2bbc7029c8ca7e0475ece1b82a7e64bfea86f5d7394ecf', 'Patched iOS native source differs'
+print('iOS content initialization now uses the pinned public entrypoint and its default overwrite policy; lifecycle and platform initialization stage preserved.')
+PY_IOS_CONTENT_SYSTEM_API
+
 # Match iOS touch bounds to the pinned frontend framebuffer-layout API.
 python3 - "$source_dir" <<'PY_IOS_WINDOW_LAYOUT_API'
 import hashlib,pathlib,subprocess,sys

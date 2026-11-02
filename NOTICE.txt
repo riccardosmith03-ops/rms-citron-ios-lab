@@ -87,3 +87,15 @@ V8 iOS touch framebuffer API correction:
   https://github.com/citron-neo/emulator/blob/c3aa70f81e15ea97ee85b6a9a71cbf75d370851e/src/core/frontend/emu_window.h
   https://github.com/citron-neo/emulator/blob/c3aa70f81e15ea97ee85b6a9a71cbf75d370851e/src/core/frontend/framebuffer_layout.h
   This repairs a compiler error. It is not an iPhone runtime result.
+
+
+V9 iOS public content-system initialization correction:
+  Replace the obsolete private CreateFactories(*vfs) call in src/ios/native.cpp
+  with the existing public InitializeContentSystem(*vfs) entrypoint.
+  Preserve overwrite=true (the API default), the non-Android FS_READY initial
+  state, provider setup, existing paths and launch/stop lifecycle. No visibility
+  changes, stubs, forced stage changes or additional core initialization.
+  API header and implementation are checked against the fixed official commit:
+  https://github.com/citron-neo/emulator/blob/c3aa70f81e15ea97ee85b6a9a71cbf75d370851e/src/core/hle/service/filesystem/filesystem.h
+  https://github.com/citron-neo/emulator/blob/c3aa70f81e15ea97ee85b6a9a71cbf75d370851e/src/core/hle/service/filesystem/filesystem.cpp
+  Keep original GPL-2.0-or-later notices. Compile and runtime remain unverified.
