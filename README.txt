@@ -105,3 +105,14 @@ refusal. These tests do not run an emulator or GPU. A Mac test pass is not an iO
 runtime proof. Future artifact review and separately authorized device validation
 must first recheck the original homebrew, Stop and Restart. No commercial title
 fault cause, playable state, frame output or memory-pressure diagnosis is claimed.
+
+Experimental V13 iOS memory profile:
+  Only the CITRON_IOS Vulkan shared texture/buffer-cache target is capped at
+  512 MiB, after the existing device reserve calculation. Existing cleanup
+  thresholds, ages, resource ownership and readback guards remain unchanged.
+  The iOS staging stream ring is capped at 32 MiB, with its existing 32 sync
+  regions and ordinary-staging fallback. Desktop/Android behavior is unchanged.
+  Guest RAM remains 4 GiB; no FPS, guest timing, ASTC or resolution setting changes.
+  This is a source experiment: allocator block sizes and other memory remain
+  independent, and lower allocation/footprint or compatibility is not established.
+  Mac compilation, artifact inspection and device measurements remain required.

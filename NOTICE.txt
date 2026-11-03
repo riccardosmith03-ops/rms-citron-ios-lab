@@ -139,3 +139,9 @@ V12 bounded numeric rendering-stage diagnostics:
   paths, addresses, memory contents or text are included in its numeric record.
   This diagnostics-only source change preserves V11 guest backing, lifecycle,
   JIT, audio, dependency pins and the nineteen-file carrier inventory.
+
+Experimental V13 iOS memory-profile additions retain the existing upstream GPL
+notices. The two CITRON_IOS policy changes cap the shared cache target at 512 MiB
+and staging stream ring at 32 MiB. They do not change guest RAM capacity, execution
+timing, cache ownership/readback guards, dependencies or public source inventory.
+No device memory-saving or game-compatibility result is claimed by this carrier.

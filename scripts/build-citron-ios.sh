@@ -26,6 +26,16 @@ for name,digest in {'src/ios/native.cpp': 'f8f0785c8e2cf29daeb90413aa6a1a6a03a4c
  assert hashlib.sha256(p.read_bytes()).hexdigest()==digest,'Unexpected render-probe source: '+name
 PY_IOS_RENDER_PROBE_BEFORE
 
+# Bind the two iOS-only memory-profile sources to the pinned revision.
+python3 - "$source_dir" <<'PY_IOS_MEMORY_PROFILE_BEFORE'
+import hashlib,pathlib,sys
+r=pathlib.Path(sys.argv[1]).resolve(strict=True)
+for name,digest in {'src/video_core/vulkan_common/vulkan_device.h': '796353aa0a42aebabca97e0b6846c1b6517f84932b3ee88aae4188c3f6f10621', 'src/video_core/renderer_vulkan/vk_staging_buffer_pool.cpp': 'e2480ecf5667ed3b65684a638f1594d2ebf387c1a0fa2cf0e12c937eeb452d01'}.items():
+ p=r/name
+ assert not p.is_symlink() and p.resolve(strict=True).is_relative_to(r)
+ assert hashlib.sha256(p.read_bytes()).hexdigest()==digest,'Unexpected iOS memory-profile source: '+name
+PY_IOS_MEMORY_PROFILE_BEFORE
+
 while IFS= read -r patch_name; do
     [[ -n "$patch_name" && "$patch_name" != \#* ]] || continue
     [[ "$patch_name" != */* && "$patch_name" == *.patch ]] || exit 5
@@ -34,6 +44,16 @@ while IFS= read -r patch_name; do
     git -C "$source_dir" apply --check "$patch_file"
     git -C "$source_dir" apply "$patch_file"
 done < "$project_dir/patches/series.txt"
+
+# Bind the two iOS-only memory-profile sources to the pinned revision.
+python3 - "$source_dir" <<'PY_IOS_MEMORY_PROFILE_AFTER'
+import hashlib,pathlib,sys
+r=pathlib.Path(sys.argv[1]).resolve(strict=True)
+for name,digest in {'src/video_core/vulkan_common/vulkan_device.h': '7354c10f2f087227a1627e040d5db40410acc1c1362b8b46b94e8ea9af689cb9', 'src/video_core/renderer_vulkan/vk_staging_buffer_pool.cpp': 'e6dfb0af847103a9567c14c656b175d6f371af9af0c4cd36e387efd2f57cb127'}.items():
+ p=r/name
+ assert not p.is_symlink() and p.resolve(strict=True).is_relative_to(r)
+ assert hashlib.sha256(p.read_bytes()).hexdigest()==digest,'Unexpected iOS memory-profile source: '+name
+PY_IOS_MEMORY_PROFILE_AFTER
 
 # Bind the complete numeric-only probe and hook sources before building.
 python3 - "$source_dir" <<'PY_IOS_RENDER_PROBE_AFTER'

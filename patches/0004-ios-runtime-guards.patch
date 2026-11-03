@@ -981,3 +981,36 @@
      if (!use_present_thread) {
          scheduler.WaitWorker();
          CopyToSwapchain(frame);
+--- a/src/video_core/vulkan_common/vulkan_device.h
++++ b/src/video_core/vulkan_common/vulkan_device.h
+@@ -757,7 +757,14 @@
+     }
+ 
+     u64 GetDeviceLocalMemory() const {
++#if defined(CITRON_IOS)
++        // Bound the shared cache target after the existing device reserve calculation.
++        // Driver heap budgets and guest RAM capacity remain independent.
++        constexpr u64 ios_cache_target = 512ULL << 20; // MiB
++        return device_access_memory < ios_cache_target ? device_access_memory : ios_cache_target;
++#else
+         return device_access_memory;
++#endif
+     }
+ 
+     bool CanReportMemoryUsage() const {
+--- a/src/video_core/renderer_vulkan/vk_staging_buffer_pool.cpp
++++ b/src/video_core/renderer_vulkan/vk_staging_buffer_pool.cpp
+@@ -33,7 +33,12 @@
+     ForEachDeviceLocalHostVisibleHeap(device, [&size](size_t index, VkMemoryHeap& heap) {
+         size = (std::max)(size, heap.size);
+     });
+-    return (std::min)(Common::AlignUp(size / 16, 256), 128_MiB);
++#if defined(CITRON_IOS)
++    constexpr auto stream_buffer_cap = 32_MiB;
++#else
++    constexpr auto stream_buffer_cap = 128_MiB;
++#endif
++    return (std::min)(Common::AlignUp(size / 16, 256), stream_buffer_cap);
+ }
+ } // Anonymous namespace
+ 
