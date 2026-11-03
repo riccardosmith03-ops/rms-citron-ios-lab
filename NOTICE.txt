@@ -145,3 +145,9 @@ notices. The two CITRON_IOS policy changes cap the shared cache target at 512 Mi
 and staging stream ring at 32 MiB. They do not change guest RAM capacity, execution
 timing, cache ownership/readback guards, dependencies or public source inventory.
 No device memory-saving or game-compatibility result is claimed by this carrier.
+
+V14 PID/memory diagnostics extend the same GPL-2.0-or-later probe with numeric
+own-process identity and bounded allocation/cache gauges. UpstreamVMA3.1.0 field
+semantics were checked against official commit009ecd192c1289c7529bff248a16cfe896254816.
+The public carrier does not include the referenceheader, logs or private receipts.
+No memory-saving, compatibility or game-play result is claimed by this addition.

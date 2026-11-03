@@ -1,6 +1,6 @@
 --- /dev/null
 +++ b/src/common/ios_render_probe.h
-@@ -0,0 +1,336 @@
+@@ -0,0 +1,426 @@
 +// SPDX-FileCopyrightText: Copyright 2026 RMS contributors
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +#pragma once
@@ -33,6 +33,12 @@
 +    UnmappedReadChunks, UnmappedReadBytes, UnmappedWriteChunks, UnmappedWriteBytes,
 +    CompositeEmpty, CompositeSkipped, CompositeHidden, Count
 +};
++inline constexpr std::size_t MemoryGaugeCount = 6;
++struct MemoryValues {
++    std::uint64_t texture_owned_bytes{}, buffer_owned_bytes{}, shared_target_bytes{};
++    std::uint64_t vma_allocation_bytes{}, vma_block_bytes{};
++    bool valid = false;
++};
 +inline constexpr std::size_t StageCount = static_cast<std::size_t>(Stage::Count);
 +inline constexpr std::size_t CounterCount = static_cast<std::size_t>(Counter::Count);
 +inline constexpr std::uint64_t WindowUs = 30'000'000;
@@ -52,6 +58,12 @@
 +    std::atomic<std::uint64_t> active_scopes{};
 +    std::array<Stats, StageCount> stages{};
 +    std::array<std::atomic<std::uint64_t>, CounterCount> counters{};
++    std::array<std::atomic<std::uint64_t>, MemoryGaugeCount> memory{};
++    // Only accepted metric leases can touch these fields; Begin refuses their reuse.
++    std::atomic<bool> sampling_memory{false};
++    std::atomic<std::uint64_t> memory_sequence{};
++    std::uint64_t last_memory_attempt_us{};
++    std::uint64_t pid{};
 +    Clock::time_point origin{};
 +    std::uint64_t window_us = WindowUs;
 +};
@@ -172,6 +184,69 @@
 +    Add(counter, amount, CaptureGeneration());
 +}
 +
++
++namespace Detail {
++struct Lease final {
++    explicit Lease(Generation value) noexcept : accepted{Acquire(value)} {}
++    ~Lease() { if (accepted) Release(); }
++    bool accepted;
++};
++inline bool CopyMemory(std::array<std::uint64_t, MemoryGaugeCount>& values) noexcept {
++    const auto first = state.memory_sequence.load(std::memory_order_seq_cst);
++    if (first == 0 || (first & 1U) != 0) return false;
++    for (std::size_t i = 0; i < MemoryGaugeCount; ++i)
++        values[i] = state.memory[i].load(std::memory_order_seq_cst);
++    return state.memory_sequence.load(std::memory_order_seq_cst) == first;
++}
++template <typename F>
++bool SampleMemoryImpl(F&& sample, Generation generation, std::uint64_t interval) noexcept {
++    Lease lease{generation};
++    if (!lease.accepted) return false;
++    if (state.sampling_memory.exchange(true, std::memory_order_seq_cst)) return false;
++    struct Clear final {
++        ~Clear() { state.sampling_memory.store(false, std::memory_order_seq_cst); }
++    } clear;
++    const auto begin = ElapsedUs();
++    if (!InWindow(begin) ||
++        (state.last_memory_attempt_us != 0 && begin - state.last_memory_attempt_us < interval))
++        return false;
++    state.last_memory_attempt_us = begin;
++    try {
++        const auto values = sample(); // GPU owner only, at most once per second in production.
++        if (!values.valid || !state.enabled.load(std::memory_order_seq_cst) ||
++            state.generation.load(std::memory_order_seq_cst) != generation) return false;
++        const auto time = ElapsedUs();
++        if (!InWindow(time)) return false;
++        const auto sequence = state.memory_sequence.load(std::memory_order_seq_cst);
++        if (sequence > UINT64_MAX - 2) return false;
++        state.memory_sequence.store(sequence + 1, std::memory_order_seq_cst);
++        const std::array<std::uint64_t, MemoryGaugeCount> next{
++            values.texture_owned_bytes, values.buffer_owned_bytes, values.shared_target_bytes,
++            values.vma_allocation_bytes, values.vma_block_bytes, time};
++        for (std::size_t i = 0; i < MemoryGaugeCount; ++i)
++            state.memory[i].store(next[i], std::memory_order_seq_cst);
++        state.memory_sequence.store(sequence + 2, std::memory_order_seq_cst);
++        return true;
++    } catch (...) {
++        return false; // Observability failure never changes emulation.
++    }
++}
++} // namespace Detail
++template <typename F>
++inline bool SampleMemory(F&& sample, Generation generation) noexcept {
++    return Detail::SampleMemoryImpl(sample, generation, IntervalUs);
++}
++template <typename F>
++inline bool SampleMemory(F&& sample) noexcept {
++    return SampleMemory(sample, CaptureGeneration());
++}
++#if defined(CITRON_RENDER_PROBE_HOST_TEST)
++template <typename F>
++inline bool SampleMemoryForHostTest(F&& sample, Generation generation) noexcept {
++    return Detail::SampleMemoryImpl(sample, generation, 0);
++}
++#endif
++
 +class Recorder final {
 +public:
 +    ~Recorder() { End(); }
@@ -220,6 +295,10 @@
 +            s.last_exit_us.store(0, std::memory_order_relaxed);
 +        }
 +        for (auto& count : state.counters) count.store(0, std::memory_order_relaxed);
++        for (auto& value : state.memory) value.store(0, std::memory_order_seq_cst);
++        state.memory_sequence.store(0, std::memory_order_seq_cst);
++        state.last_memory_attempt_us = 0;
++        state.pid = static_cast<std::uint64_t>(::getpid());
 +        state.origin = Clock::now();
 +        state.window_us = window;
 +        state.generation.store(old + 1, std::memory_order_seq_cst);
@@ -267,6 +346,9 @@
 +    }
 +    bool Snapshot(FILE* file, unsigned reason) noexcept {
 +        if (records >= MaxRecords) return false;
++        std::array<std::uint64_t, MemoryGaugeCount> memory{};
++        // Capture gauges before record time; a coherent sample cannot be from its future.
++        const bool has_memory = Detail::CopyMemory(memory);
 +        char line[4096];
 +        std::size_t used = 0;
 +        bool valid = true;
@@ -284,7 +366,8 @@
 +        const auto load = [](const auto& value) {
 +            return static_cast<unsigned long long>(value.load(std::memory_order_relaxed));
 +        };
-+        append("{\"v\":1,\"g\":%llu,\"t_us\":%llu,\"r\":%u,\"enabled\":%u,\"s\":[",
++        append("{\"v\":2,\"pid\":%llu,\"g\":%llu,\"t_us\":%llu,\"r\":%u,\"enabled\":%u,\"s\":[",
++               static_cast<unsigned long long>(Detail::state.pid),
 +               load(Detail::state.generation),
 +               static_cast<unsigned long long>(Detail::ElapsedUs()), reason,
 +               Detail::state.enabled.load(std::memory_order_seq_cst) ? 1U : 0U);
@@ -296,7 +379,14 @@
 +        append("],\"c\":[");
 +        for (std::size_t i = 0; i < CounterCount; ++i)
 +            append("%s%llu", i ? "," : "", load(Detail::state.counters[i]));
-+        append("]}\n");
++        append("]");
++        if (has_memory) {
++            append(",\"m\":[");
++            for (std::size_t i = 0; i < MemoryGaugeCount; ++i)
++                append("%s%llu", i ? "," : "", static_cast<unsigned long long>(memory[i]));
++            append("]");
++        }
++        append("}\n");
 +        if (!valid || used > MaxBytes - bytes || std::fwrite(line, 1, used, file) != used ||
 +            std::fflush(file) != 0) return false;
 +        ++records;
@@ -1014,3 +1104,95 @@
  }
  } // Anonymous namespace
  
+--- a/src/video_core/renderer_vulkan/vk_rasterizer.cpp
++++ b/src/video_core/renderer_vulkan/vk_rasterizer.cpp
+@@ -18,6 +18,9 @@
+ 
+ #include "citron/util/title_ids.h"
+ #include "common/assert.h"
++#if defined(CITRON_IOS)
++#include "common/ios_render_probe.h"
++#endif
+ #include "common/logging.h"
+ #include "common/scope_exit.h"
+ #include "common/settings.h"
+@@ -1160,8 +1163,22 @@
+     staging_pool.TickFrame();
+     // Cache capacity is shared by textures and buffers; Vulkan heap estimates
+     // include other process resources and must remain a separate pressure signal.
++#if defined(CITRON_IOS)
++    const u64 texture_usage = GetTextureMemoryUsage();
++    const u64 buffer_usage = GetBufferMemoryUsage();
++    const u64 cache_usage = texture_usage + buffer_usage;
++#else
+     const u64 cache_usage = GetTextureMemoryUsage() + GetBufferMemoryUsage();
++#endif
+     const u64 cache_target = device.GetDeviceLocalMemory();
++#if defined(CITRON_IOS)
++    Common::IOS::RenderProbe::SampleMemory([&]() noexcept {
++        u64 allocation_bytes{}, block_bytes{};
++        const bool valid = memory_allocator.GetProbeMemoryStatistics(allocation_bytes, block_bytes);
++        return Common::IOS::RenderProbe::MemoryValues{
++            texture_usage, buffer_usage, cache_target, allocation_bytes, block_bytes, valid};
++    });
++#endif
+     const auto heap_budgets = device.GetHeapMemoryBudgets();
+     {
+         std::scoped_lock lock{texture_cache.mutex};
+--- a/src/video_core/vulkan_common/vulkan_memory_allocator.h
++++ b/src/video_core/vulkan_common/vulkan_memory_allocator.h
+@@ -121,6 +121,11 @@
+     /// Advances VMA's frame index so cached heap budgets are refreshed.
+     void TickFrame();
+ 
++#if defined(CITRON_IOS)
++    /// VMA-owned allocation/block bytes across actual heaps; excludes external/guest memory.
++    bool GetProbeMemoryStatistics(u64& allocation_bytes, u64& block_bytes) const noexcept;
++#endif
++
+     /// Commits memory required by the buffer and binds it.
+     MemoryCommit Commit(const vk::Buffer& buffer, MemoryUsage usage);
+ 
+--- a/src/video_core/vulkan_common/vulkan_memory_allocator.cpp
++++ b/src/video_core/vulkan_common/vulkan_memory_allocator.cpp
+@@ -3,6 +3,10 @@
+ // SPDX-License-Identifier: GPL-2.0-or-later
+ 
+ #include <algorithm>
++#if defined(CITRON_IOS)
++#include <array>
++#include <limits>
++#endif
+ #include <bit>
+ #include <optional>
+ #include <utility>
+@@ -270,6 +274,29 @@
+     device.RefreshDeviceMemoryUsage(allocator);
+ }
+ 
++#if defined(CITRON_IOS)
++bool MemoryAllocator::GetProbeMemoryStatistics(u64& allocation_bytes, u64& block_bytes) const noexcept {
++    allocation_bytes = 0;
++    block_bytes = 0;
++    if (properties.memoryHeapCount == 0 || properties.memoryHeapCount > VK_MAX_MEMORY_HEAPS)
++        return false;
++    std::array<VmaBudget, VK_MAX_MEMORY_HEAPS> budgets{};
++    // VMA3.1 fills exactly its physical memoryHeapCount entries.
++    // No allocation callbacks or explicit GPU waits; VMA may take internal locks.
++    vmaGetHeapBudgets(allocator, budgets.data());
++    for (u32 i = 0; i < properties.memoryHeapCount; ++i) {
++        const auto& statistics = budgets[i].statistics;
++        if (statistics.allocationBytes > statistics.blockBytes ||
++            statistics.allocationBytes > std::numeric_limits<u64>::max() - allocation_bytes ||
++            statistics.blockBytes > std::numeric_limits<u64>::max() - block_bytes)
++            return false;
++        allocation_bytes += statistics.allocationBytes;
++        block_bytes += statistics.blockBytes;
++    }
++    return true;
++}
++#endif
++
+ vk::Image MemoryAllocator::CreateImage(const VkImageCreateInfo& ci) const {
+     const VmaAllocationCreateInfo alloc_ci = {
+         .flags = VMA_ALLOCATION_CREATE_WITHIN_BUDGET_BIT,

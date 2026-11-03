@@ -116,3 +116,20 @@ Experimental V13 iOS memory profile:
   This is a source experiment: allocator block sizes and other memory remain
   independent, and lower allocation/footprint or compatibility is not established.
   Mac compilation, artifact inspection and device measurements remain required.
+
+V14 local memory diagnostics (PID + six gauges; GC counters deferred):
+  Schema2 adds this process's numeric PID to every record. The original14stages
+  and12counters keep their meanings. Optional m[6] is texture-cache ownedbytes,
+  buffer-cache ownedbytes, sharedcache targetbytes, VMA allocationbytes, VMA
+  blockbytes, and sample elapsedmicroseconds. An absent array means no coherent
+  sample is available; it does not mean zero memory. Sampling uses an accepted
+  launchgeneration lease and atmost1Hz GPU-owner work; the recorder does not
+  call GPU/allocator APIs, wait or spin. Publication is coherent but the allocator
+  and cache counts are estimates sampled at different points, not residency.
+  VMA3.1 allocationbytes and blockbytes are distinct. They exclude guest/JIT and
+  allocations made outside that VMAallocator. Cachebytes can fall before delayed
+  destruction releases resources. PID strengthens processattribution; filemtime
+  and elapsedtime alone do not establish wallclockalignment or gameplay.
+  V13's512MiB cachetarget/32MiB stagingring, all GC policies, guestRAM, timing,
+  dependencies, lifecycle and old probe counters remain unchanged. VMA blocksize
+  preference remains unchanged. This candidate has not been built or device-tested.

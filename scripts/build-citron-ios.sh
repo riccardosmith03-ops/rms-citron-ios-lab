@@ -36,6 +36,16 @@ for name,digest in {'src/video_core/vulkan_common/vulkan_device.h': '796353aa0a4
  assert hashlib.sha256(p.read_bytes()).hexdigest()==digest,'Unexpected iOS memory-profile source: '+name
 PY_IOS_MEMORY_PROFILE_BEFORE
 
+# Bind the iOS memory diagnostics inputs/outputs; no runtime policy changes.
+python3 - "$source_dir" <<'PY_IOS_MEMORY_DIAGNOSTICS_BEFORE'
+import hashlib,pathlib,sys
+r=pathlib.Path(sys.argv[1]).resolve(strict=True)
+for name,digest in {'src/video_core/renderer_vulkan/vk_rasterizer.cpp': '0aab379999a047948b31f2a437bd557d3db3280badb3e3e9ce6adca2454bdb49', 'src/video_core/vulkan_common/vulkan_memory_allocator.h': '50af6bf7def8bc15badda5777816829031eef8209392d58830b1ddd910cb8967', 'src/video_core/vulkan_common/vulkan_memory_allocator.cpp': 'f902b1d369648d57d12cb5e1eb91044377fca47ae4221371a5cbc5d97d2ab820'}.items():
+ p=r/name
+ assert not p.is_symlink() and p.resolve(strict=True).is_relative_to(r)
+ assert hashlib.sha256(p.read_bytes()).hexdigest()==digest,'Unexpected iOS memory-diagnostics source: '+name
+PY_IOS_MEMORY_DIAGNOSTICS_BEFORE
+
 while IFS= read -r patch_name; do
     [[ -n "$patch_name" && "$patch_name" != \#* ]] || continue
     [[ "$patch_name" != */* && "$patch_name" == *.patch ]] || exit 5
@@ -55,11 +65,21 @@ for name,digest in {'src/video_core/vulkan_common/vulkan_device.h': '7354c10f2f0
  assert hashlib.sha256(p.read_bytes()).hexdigest()==digest,'Unexpected iOS memory-profile source: '+name
 PY_IOS_MEMORY_PROFILE_AFTER
 
+# Bind the iOS memory diagnostics inputs/outputs; no runtime policy changes.
+python3 - "$source_dir" <<'PY_IOS_MEMORY_DIAGNOSTICS_AFTER'
+import hashlib,pathlib,sys
+r=pathlib.Path(sys.argv[1]).resolve(strict=True)
+for name,digest in {'src/video_core/renderer_vulkan/vk_rasterizer.cpp': 'afc5dec28e8d632d70550a5a9bf5fa4cafd236ee370ca15fec2a327c272121e1', 'src/video_core/vulkan_common/vulkan_memory_allocator.h': 'abe441a8c915117ba410a1cd916aa2b51c143df053af259d90d364d3b6758bf8', 'src/video_core/vulkan_common/vulkan_memory_allocator.cpp': '0ced71785a1080b759a0c23ca86be96e952941ce51985a04401b0874cbe21688'}.items():
+ p=r/name
+ assert not p.is_symlink() and p.resolve(strict=True).is_relative_to(r)
+ assert hashlib.sha256(p.read_bytes()).hexdigest()==digest,'Unexpected iOS memory-diagnostics source: '+name
+PY_IOS_MEMORY_DIAGNOSTICS_AFTER
+
 # Bind the complete numeric-only probe and hook sources before building.
 python3 - "$source_dir" <<'PY_IOS_RENDER_PROBE_AFTER'
 import hashlib,pathlib,sys
 r=pathlib.Path(sys.argv[1]).resolve(strict=True)
-for name,digest in {'src/ios/native.cpp': '4d7cf88f177aec469c72ed651ed903025494d5aee6a2ed064a29c6e1dd11177e', 'src/ios/emu_window/emu_window.cpp': 'f12d486c2bc2c6744ef4b58fcd68f6b9fa3c13b618cf2d4cce11d3d09291410a', 'src/core/hle/service/nvdrv/devices/nvhost_gpu.cpp': 'b4100833090b1c8069eb56b026de4935e3b9cbd8258f97bc8cf96eb342278308', 'src/video_core/gpu_thread.cpp': '68a0dae863b143765d968598c760193b4f0d034e46590c970faa16b40ca18d14', 'src/core/hle/service/nvnflinger/buffer_queue_producer.cpp': 'a308d2b1f86d40ef0739a0a9043a4b48fe24b20f5c77deb61f47c1253b029b94', 'src/core/hle/service/nvnflinger/hardware_composer.cpp': '16452f72b00f005d5c98abfa24fc2e2bcf8ef9eaa06abfbd5734c57c417efa6d', 'src/video_core/gpu.cpp': 'bf00efab550e4528d07b639a2a886e1f99ee34cfa5910c17a8951c8c2fa885ee', 'src/video_core/renderer_vulkan/renderer_vulkan.cpp': '5fac00a19a35dd09554e7a255257eabeecaef2415a65b9f41c67ab69055a9578', 'src/video_core/renderer_vulkan/vk_present_manager.cpp': '2b9eb2464bc3eb4a4683c0d0b5a9a6522b78efdfaae7da95a22dd24860d83108', 'src/core/device_memory_manager.inc': '9202e645c29abfbf8c0ae81cec8b5445d79b8d84f45ff77219173a3e14772509', 'src/ios/jit_icache_callbacks_ios.cpp': '5a06b39329d23a189fc40fbb454b2b86dd1b6ec117d3a55e5fb2b5ae1c64f939', 'src/common/ios_render_probe.h': '8fb9943ff49287ce767a73baed41e01f165a317795d0c636bf057228ac905c23'}.items():
+for name,digest in {'src/ios/native.cpp': '4d7cf88f177aec469c72ed651ed903025494d5aee6a2ed064a29c6e1dd11177e', 'src/ios/emu_window/emu_window.cpp': 'f12d486c2bc2c6744ef4b58fcd68f6b9fa3c13b618cf2d4cce11d3d09291410a', 'src/core/hle/service/nvdrv/devices/nvhost_gpu.cpp': 'b4100833090b1c8069eb56b026de4935e3b9cbd8258f97bc8cf96eb342278308', 'src/video_core/gpu_thread.cpp': '68a0dae863b143765d968598c760193b4f0d034e46590c970faa16b40ca18d14', 'src/core/hle/service/nvnflinger/buffer_queue_producer.cpp': 'a308d2b1f86d40ef0739a0a9043a4b48fe24b20f5c77deb61f47c1253b029b94', 'src/core/hle/service/nvnflinger/hardware_composer.cpp': '16452f72b00f005d5c98abfa24fc2e2bcf8ef9eaa06abfbd5734c57c417efa6d', 'src/video_core/gpu.cpp': 'bf00efab550e4528d07b639a2a886e1f99ee34cfa5910c17a8951c8c2fa885ee', 'src/video_core/renderer_vulkan/renderer_vulkan.cpp': '5fac00a19a35dd09554e7a255257eabeecaef2415a65b9f41c67ab69055a9578', 'src/video_core/renderer_vulkan/vk_present_manager.cpp': '2b9eb2464bc3eb4a4683c0d0b5a9a6522b78efdfaae7da95a22dd24860d83108', 'src/core/device_memory_manager.inc': '9202e645c29abfbf8c0ae81cec8b5445d79b8d84f45ff77219173a3e14772509', 'src/ios/jit_icache_callbacks_ios.cpp': '5a06b39329d23a189fc40fbb454b2b86dd1b6ec117d3a55e5fb2b5ae1c64f939', 'src/common/ios_render_probe.h': '10d747d48e4c21275a7d74909b5032e263008231a889e98002517e903151b52d'}.items():
  p=r/name
  assert not p.is_symlink() and p.resolve(strict=True).is_relative_to(r)
  assert hashlib.sha256(p.read_bytes()).hexdigest()==digest,'Unexpected render-probe source: '+name
@@ -492,34 +512,157 @@ int main(int argc, char** argv) {
     assert(recorder.Begin(log_link)); recorder.End();
     assert(!fs::exists(Log(real_dir) / FileName));
     assert(Detail::state.active_scopes.load() == 0);
+    // Actual helper semantics: bounded calls, coherent six-value publication and ownPID.
+    assert(recorder.Begin(directory("memory-numeric")));
+    const auto memory_generation = CaptureGeneration();
+    assert(Detail::state.pid == static_cast<std::uint64_t>(::getpid()));
+    std::array<std::uint64_t, MemoryGaugeCount> memory{};
+    assert(!Detail::CopyMemory(memory));
+    int calls = 0;
+    const auto sample = [&] {
+        ++calls;
+        assert(!SampleMemory([] { return MemoryValues{}; }, memory_generation)); // no reentrant spin
+        return MemoryValues{100, 200, 512ULL << 20, 400, 500, true};
+    };
+    assert(SampleMemory(sample, memory_generation));
+    assert(!SampleMemory(sample, memory_generation) && calls == 1); // production1Hz gate
+    assert(Detail::CopyMemory(memory));
+    assert(memory[0] == 100 && memory[1] == 200 && memory[2] == (512ULL << 20));
+    assert(memory[3] == 400 && memory[4] == 500 && memory[5] > 0);
+    recorder.End();
+
+    // Old creator generation cannot invoke a sampler or publish into a restarted launch.
+    assert(recorder.Begin(directory("memory-restart")));
+    const auto restarted_generation = CaptureGeneration();
+    assert(restarted_generation > memory_generation && !Detail::CopyMemory(memory));
+    bool stale_called = false;
+    assert(!SampleMemoryForHostTest([&] { stale_called = true; return MemoryValues{}; }, memory_generation));
+    assert(!stale_called);
+    // An observability exception releases both controls; subsequent sampling still works.
+    assert(!SampleMemoryForHostTest([]() -> MemoryValues { throw 1; }, restarted_generation));
+    assert(Detail::state.active_scopes.load() == 0 && !Detail::state.sampling_memory.load());
+    assert(SampleMemoryForHostTest([] { return MemoryValues{1, 2, 3, 4, 5, true}; }, restarted_generation));
+    recorder.End();
+
+    // End during an accepted capture neither waits for it nor allows premature State reuse.
+    assert(recorder.Begin(directory("memory-live")));
+    const auto live_generation = CaptureGeneration();
+    std::atomic<bool> capture_entered{false}, release_capture{false};
+    std::thread live_capture([&] {
+        assert(!SampleMemoryForHostTest([&] {
+            capture_entered.store(true);
+            const auto until = Clock::now() + std::chrono::seconds(2);
+            while (!release_capture.load() && Clock::now() < until)
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            return MemoryValues{10, 20, 30, 40, 50, true};
+        }, live_generation));
+    });
+    const auto entered_until = Clock::now() + std::chrono::seconds(2);
+    while (!capture_entered.load() && Clock::now() < entered_until)
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    assert(capture_entered.load());
+    end_started = Clock::now(); recorder.End();
+    assert(Clock::now() - end_started < std::chrono::seconds(2));
+    assert(!recorder.Begin(directory("memory-refused")));
+    release_capture.store(true); live_capture.join();
+    assert(Detail::state.active_scopes.load() == 0);
+    assert(recorder.Begin(directory("memory-after-live")));
+    assert(!Detail::CopyMemory(memory));
+    recorder.End();
+
+    // A nonspinning reader may omit an overlapping tuple, never accept a mixed one.
+    assert(recorder.Begin(directory("memory-race")));
+    const auto race_generation = CaptureGeneration();
+    std::atomic<bool> writer_done{false};
+    std::thread memory_writer([&] {
+        for (std::uint64_t i = 1; i <= 5000; ++i)
+            assert(SampleMemoryForHostTest([i] {
+                return MemoryValues{i, i + 1, i + 2, i * 2, i * 2 + 100, true};
+            }, race_generation));
+        writer_done.store(true);
+    });
+    while (!writer_done.load()) {
+        if (Detail::CopyMemory(memory)) {
+            assert(memory[1] == memory[0] + 1 && memory[2] == memory[0] + 2);
+            assert(memory[3] == memory[0] * 2 && memory[4] == memory[3] + 100);
+        }
+    }
+    memory_writer.join(); recorder.End();
+    assert(Detail::state.active_scopes.load() == 0);
+    std::puts("HOST_MAC_MEMORY_DIAGNOSTICS_PASS_NOT_IOS_RUNTIME_PROOF");
     std::puts("HOST_MAC_RENDER_PROBE_PASS_NOT_IOS_RUNTIME_PROOF");
 }
 CPP_IOS_RENDER_PROBE_HOST
 python3 - "$deps/build/ios-render-probe-host.cpp" <<'PY_IOS_RENDER_PROBE_TEST_PIN'
 import hashlib,pathlib,sys
-assert hashlib.sha256(pathlib.Path(sys.argv[1]).read_bytes()).hexdigest()=='00b7d3b644650cb89b2d2ac07d5da0d1777043bbbc2b9cc30d5360c440416fe2'
+assert hashlib.sha256(pathlib.Path(sys.argv[1]).read_bytes()).hexdigest()=='022f6b041fdab04361ad152ed61d87ba42e460fe332a1863e0afda578968811e'
 PY_IOS_RENDER_PROBE_TEST_PIN
 env -u SDKROOT -u IPHONEOS_DEPLOYMENT_TARGET -u CFLAGS -u CXXFLAGS -u CPPFLAGS -u LDFLAGS     xcrun --sdk macosx clang++ -std=c++23 -UNDEBUG -pthread -Wformat -Werror=format-security     -isysroot "$(xcrun --sdk macosx --show-sdk-path)"     -I "$source_dir/src" "$deps/build/ios-render-probe-host.cpp"     -o "$deps/build/ios-render-probe-host-test"
 "$deps/build/ios-render-probe-host-test" "$deps/build/ios-render-probe-fixtures"
 python3 - "$deps/build/ios-render-probe-fixtures" <<'PY_IOS_RENDER_PROBE_SCHEMA'
-import json,pathlib,sys
+"""Strict local schema-v2 validator. No phone/network modules or filesystem writes."""
+import json
+MAX_BYTES=128*1024
+MAX_RECORDS=32
+WINDOW_US=30_000_000
+def _need(value):
+    if not value: raise ValueError('probe_schema_v2_refused')
+def _pairs(pairs):
+    result={}
+    for k,v in pairs:
+        _need(k not in result)
+        result[k]=v
+    return result
+def _number(value):
+    return type(value) is int and 0<=value<2**64
+def validate(data,expected_pid=None):
+    _need(type(data) is bytes and len(data)<=MAX_BYTES)
+    if expected_pid is not None:_need(type(expected_pid) is int and 0<expected_pid<=2**31-1)
+    lines=data.splitlines(keepends=True);partial=0
+    if lines and not lines[-1].endswith(b'\n'):partial=len(lines.pop())
+    _need(len(lines)<=MAX_RECORDS)
+    records=[];pid=None;generation=None;previous_time=0;previous_sample=0
+    for line in lines:
+        obj=json.loads(line,object_pairs_hook=_pairs)
+        _need(type(obj) is dict and set(obj) in (
+            {'v','pid','g','t_us','r','enabled','s','c'},
+            {'v','pid','g','t_us','r','enabled','s','c','m'}))
+        _need(all(_number(obj[k]) for k in ('v','pid','g','t_us','r','enabled')))
+        _need(obj['v']==2 and 0<obj['pid']<=2**31-1 and obj['g']>0 and
+              obj['t_us']>=previous_time and obj['r'] in (0,1,2,3) and obj['enabled'] in (0,1))
+        if pid is None:pid=obj['pid'];generation=obj['g']
+        _need(obj['pid']==pid and obj['g']==generation and (expected_pid is None or pid==expected_pid))
+        _need(type(obj['s']) is list and len(obj['s'])==14 and
+              type(obj['c']) is list and len(obj['c'])==12)
+        for row in obj['s']:
+            _need(type(row) is list and len(row)==6 and all(_number(x) for x in row))
+            _need(all(x<=WINDOW_US for x in row[2:]))
+        _need(all(_number(x) for x in obj['c']))
+        if 'm' in obj:
+            m=obj['m']
+            _need(type(m) is list and len(m)==6 and all(_number(x) for x in m))
+            _need(m[3]<=m[4] and previous_sample<=m[5]<=min(obj['t_us'],WINDOW_US) and m[5]>0)
+            previous_sample=m[5]
+        previous_time=obj['t_us'];records.append(obj)
+    return {'records':records,'pid':pid,'generation':generation,'ignored_partial_bytes':partial,
+            'pid_verified':bool(records) and expected_pid is not None,'metric_records':sum('m' in r for r in records)}
+
+import pathlib,sys
 root=pathlib.Path(sys.argv[1])
-for leaf in ['numeric','live-scope','stale-callback','race-old','race-new','deadline']:
- p=root/leaf/'citron/log/render-stage-probe.jsonl'
- assert p.is_file() and not p.is_symlink() and p.stat().st_nlink==1
- data=p.read_bytes();assert 0<len(data)<=128*1024
- lines=data.splitlines();assert 1<=len(lines)<=32
- for line in lines:
-  obj=json.loads(line);assert set(obj)=={'v','g','t_us','r','enabled','s','c'}
-  assert all(type(obj[k]) is int for k in ['v','g','t_us','r','enabled'])
-  assert obj['v']==1 and obj['g']>0 and obj['t_us']>=0 and obj['r'] in [0,1,2,3] and obj['enabled'] in [0,1]
-  assert len(obj['s'])==14 and len(obj['c'])==12
-  for row in obj['s']:
-   assert len(row)==6 and all(type(x) is int and 0<=x<2**64 for x in row)
-   assert all(x<=30_000_000 for x in row[2:])
-  assert all(type(x) is int and 0<=x<2**64 for x in obj['c'])
- last=json.loads(lines[-1]);assert last['enabled']==0
- if leaf=='deadline':assert last['r'] in (2,3) and last['t_us']>=80_000
+expected_pid=None
+for leaf in ['numeric','live-scope','stale-callback','race-old','race-new','deadline',
+             'memory-numeric','memory-restart','memory-live','memory-after-live','memory-race']:
+    p=root/leaf/'citron/log/render-stage-probe.jsonl'
+    assert p.is_file() and not p.is_symlink() and p.stat().st_nlink==1
+    data=p.read_bytes();assert 0<len(data)<=MAX_BYTES
+    parsed=validate(data,expected_pid);records=parsed['records']
+    assert records and parsed['ignored_partial_bytes']==0
+    if expected_pid is None:expected_pid=parsed['pid']
+    assert records[-1]['enabled']==0
+    if leaf=='deadline':assert records[-1]['r'] in (2,3) and records[-1]['t_us']>=80_000
+    if leaf=='memory-numeric':
+        assert records[-1]['m'][:5]==[100,200,512<<20,400,500]
+    if leaf=='memory-race':assert parsed['metric_records']>0
 print('HOST_MAC_RENDER_PROBE_JSON_SCHEMA_PASS_NOT_IOS_RUNTIME_PROOF')
 PY_IOS_RENDER_PROBE_SCHEMA
 
