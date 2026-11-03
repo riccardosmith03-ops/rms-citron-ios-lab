@@ -19,3 +19,40 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+GPU-clear control provenance and dependency notice
+-------------------------------------------------
+The RMS GPU-clear control is an original MIT-licensed adaptation of the API setup
+pattern in switchbrew/switch-examples, commit
+669786898205b7beb25ff1731e72982e6d0397d3,
+graphics/deko3d/deko_basic/source/main.c. That example repository marks its
+examples public domain: https://github.com/switchbrew/switch-examples/blob/669786898205b7beb25ff1731e72982e6d0397d3/README.md
+The adaptation omits all shaders, RomFS and external assets. It is not the original
+example, and it makes no shader-translation or gameplay claim.
+
+GPU-clear mode links the deko3d library supplied by the SHA-pinned official
+devkitPro image (package deko3d 0.5.0-1). Its API/notice reference is
+devkitPro/deko3d@5cc144dcf5606fbcd78430f6c62923546e5f9cf4 (v0.5.0).
+The image's actual preserved header/archive hashes are recorded by the build;
+package version alone is not claimed to prove a source-to-binary correspondence.
+The unmodified deko3d Zlib notice follows. The pinned libnx notice is also included
+in the build artifact by the existing recipe.
+
+Copyright (C) 2018-2020 fincs
+
+This software is provided 'as-is', without any express or implied
+warranty.  In no event will the authors be held liable for any
+damages arising from the use of this software.
+
+Permission is granted to anyone to use this software for any
+purpose, including commercial applications, and to alter it and
+redistribute it freely, subject to the following restrictions:
+
+1. The origin of this software must not be misrepresented; you
+   must not claim that you wrote the original software. If you use
+   this software in a product, an acknowledgment in the product
+   documentation would be appreciated but is not required.
+2. Altered source versions must be plainly marked as such, and
+   must not be misrepresented as being the original software.
+3. This notice may not be removed or altered from any source
+   distribution.

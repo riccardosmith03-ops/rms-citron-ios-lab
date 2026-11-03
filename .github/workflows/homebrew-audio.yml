@@ -1,10 +1,17 @@
-# Proposed EXTRA three-file scope. Local candidate only; not published or dispatched.
-# Original MIT smoke, no ROM/firmware/keys/assets; the generated Switch executable is never run by this job.
+# Manual source controls: audio is the default; GPU clear is an optional separate NRO.
+# No ROM/firmware/keys/assets; this job never executes the generated Switch executable.
 # The reviewed Makefile, container recipe and validator below are exact inline copies.
-name: Original Citron homebrew audio smoke (UNTESTED)
+name: Original Citron homebrew controls (STATIC ONLY)
 
 on:
   workflow_dispatch:
+    inputs:
+      mode:
+        description: Control to build; artifacts are not executed
+        type: choice
+        required: true
+        default: audio
+        options: [audio, gpu-clear]
 
 permissions:
   contents: read
@@ -18,6 +25,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     env:
+      RMS_HOME_MODE: ${{ inputs.mode || 'audio' }}
       RMS_AUDIO_IMAGE: devkitpro/devkita64@sha256:82575ea78651b530b2e232bb3799cfd1fe331514e053d5f724bb4b28191fb79d
     steps:
       - name: Checkout the dedicated source project
@@ -44,12 +52,20 @@ jobs:
           endif
           include $(DEVKITPRO)/libnx/switch_rules
           
+          RMS_HOME_MODE ?= audio
           TARGET := rms-citron-audio-smoke
+          ifeq ($(RMS_HOME_MODE),gpu-clear)
+          TARGET := rms-citron-gpu-clear-v1
+          CONTROL_CFLAGS := -DRMS_GPU_CLEAR_CONTROL=1
+          CONTROL_LIBS := -ldeko3d
+          else ifneq ($(RMS_HOME_MODE),audio)
+          $(error Unsupported RMS_HOME_MODE)
+          endif
           BUILD := build
           ARCH := -march=armv8-a+crc+crypto -mtune=cortex-a57 -mtp=soft -fPIE
-          CFLAGS := -std=gnu11 -O2 -Wall -Wextra -ffunction-sections $(ARCH) $(INCLUDE) -D__SWITCH__
+          CFLAGS := -std=gnu11 -O2 -Wall -Wextra -ffunction-sections $(ARCH) $(INCLUDE) -D__SWITCH__ $(CONTROL_CFLAGS)
           LDFLAGS = -specs=$(DEVKITPRO)/libnx/switch.specs $(ARCH) -Wl,-Map,$(OUTPUT).map
-          LIBS := -lnx
+          LIBS := $(CONTROL_LIBS) -lnx
           
           ifneq ($(BUILD),$(notdir $(CURDIR)))
           export OUTPUT := $(CURDIR)/$(TARGET)
@@ -77,13 +93,18 @@ jobs:
           RMS_AUDIO_MAKEFILE_EXACT
           cat > "$RMS_AUDIO_STAGE/recipe/build-in-container.sh" <<'RMS_AUDIO_CONTAINER_RECIPE_EXACT'
           #!/usr/bin/env bash
-          # LOCAL RECIPE ONLY: not executed, not part of the approved public carrier.
-          # Future use: inside the official disposable Linux/amd64 devkitPro container.
+          # Disposable Linux/amd64 devkitPro recipe; cross-compile and static checks only.
           set -euo pipefail
           test "$#" -eq 3 && test "$1" = --allow-disposable-container-sdk-change || {
             echo 'usage: build-in-container.sh --allow-disposable-container-sdk-change SOURCE_DIR NEW_OUTPUT_DIR' >&2
             exit 2
           }
+          mode=${RMS_HOME_MODE:-audio}
+          case "$mode" in
+            audio) name=rms-citron-audio-smoke ;;
+            gpu-clear) name=rms-citron-gpu-clear-v1 ;;
+            *) echo 'unsupported control mode' >&2; exit 2 ;;
+          esac
           source_dir=$(realpath "$2")
           output_dir=$(realpath -m "$3")
           recipe_dir=$(cd "$(dirname "$0")" && pwd)
@@ -149,10 +170,11 @@ jobs:
           mkdir "$output_dir"
           exec > >(tee "$output_dir/build.log") 2>&1
           printf '%s\n' 'SOURCE_RECIPE_NOT_RUNTIME_AUDIO_PROOF'
-          printf '%s\n' '913e9712c56ac3a0ad8633b9488a77cc11edc87effcd5d82984db0e00354bd78  source/main.c' \
-            'ab9d65cd418b676e6b3aad215346beb37090768269867eb9b2f322ff924e8e14  Makefile' \
-            'c5db20e2df97a0700e4d1567c665cc2fa339149eb31e6088f21047a35ff30320  LICENSE.txt' \
+          printf '%s\n' 'fac69942c6abce19e9e57a7d5091507d598c3fdcbacce8637145263e61c9d618  source/main.c' \
+            'e760c8669579b44fed79f5d4a8d3cf44d6e1d1853bb59a9c745b618bce61f1d1  Makefile' \
+            '50d4fd67fc6103fe4ec1b8d3c08a30cb99a2603be0abda4d7b466f9380e78c2a  LICENSE.txt' \
             | (cd "$source_dir" && sha256sum --check --strict -)
+          printf '%s\n' "$mode" > "$output_dir/control-mode.txt"
           dkp-pacman -Q > "$output_dir/container-packages.txt"
           aarch64-none-elf-gcc --version > "$output_dir/compiler-version.txt"
           sha256sum "$(command -v elf2nro)" "$(command -v aarch64-none-elf-gcc)" > "$output_dir/tool-hashes.txt"
@@ -179,18 +201,51 @@ jobs:
           sha256sum /opt/devkitpro/libnx/lib/libnx.a > "$output_dir/libnx-built-hash.txt"
           cp "$scratch/libnx/LICENSE.md" "$output_dir/libnx-LICENSE.md"
           
+          # Only GPU mode needs deko3d. The old prefix is the pinned image's untouched copy.
+          # Copy exactly the C header and release archive; never mix its libnx.a/rules/specs.
+          if [[ "$mode" == gpu-clear ]]; then
+            test "$(dkp-pacman -Q deko3d)" = 'deko3d 0.5.0-1'
+            python3 - "$scratch/image-libnx-not-used" /opt/devkitpro/libnx "$output_dir/deko3d-preserved.json" <<'GPU_DEKO_PRESERVE'
+          import hashlib,json,os,pathlib,stat,sys
+          old,new,report=map(pathlib.Path,sys.argv[1:])
+          assert old.is_dir() and not old.is_symlink() and old.resolve()==old
+          assert new.is_dir() and not new.is_symlink() and new.resolve()==new
+          entries=[]
+          for name,limit in [('include/deko3d.h',1024*1024),('lib/libdeko3d.a',64*1024*1024)]:
+           src,dst=old/name,new/name
+           before=src.lstat()
+           assert stat.S_ISREG(before.st_mode) and before.st_nlink==1 and before.st_uid==0
+           assert not src.is_symlink() and src.resolve().is_relative_to(old)
+           assert 0<before.st_size<=limit and stat.S_IMODE(before.st_mode)&0o022==0
+           assert dst.parent.is_dir() and not dst.parent.is_symlink() and dst.parent.resolve().is_relative_to(new)
+           assert not os.path.lexists(dst)
+           raw=src.read_bytes();digest=hashlib.sha256(raw).hexdigest()
+           after=src.lstat()
+           stable=lambda s:(s.st_dev,s.st_ino,s.st_mode,s.st_uid,s.st_gid,s.st_nlink,s.st_size,s.st_mtime_ns,s.st_ctime_ns)
+           assert stable(before)==stable(after) and len(raw)==before.st_size
+           if name=='include/deko3d.h':assert digest=='0388f36a5891e526066f89df7c055da1368a502d096e3fa15cb91f0d81aac54e'
+           with dst.open('xb') as stream:stream.write(raw)
+           os.chmod(dst,0o644)
+           assert hashlib.sha256(dst.read_bytes()).hexdigest()==digest
+           entries.append({'name':name,'bytes':len(raw),'sha256':digest,'copied_byte_identical':True})
+          with report.open('x',encoding='utf-8') as stream:
+           json.dump({'status':'EXACT_TWO_DEKO_INPUTS_PRESERVED','package':'deko3d 0.5.0-1',
+           'image_reference_expected':'devkitpro/devkita64@sha256:82575ea78651b530b2e232bb3799cfd1fe331514e053d5f724bb4b28191fb79d',
+           'upstream_api_reference':'5cc144dcf5606fbcd78430f6c62923546e5f9cf4','entries':entries},stream,indent=2)
+          GPU_DEKO_PRESERVE
+          fi
+          
           # Source is mounted read-only. Compile a new copy; never edit the reviewed source.
           mkdir "$scratch/smoke" "$scratch/smoke/source"
           cp "$source_dir/source/main.c" "$scratch/smoke/source/main.c"
           cp "$source_dir/Makefile" "$scratch/smoke/Makefile"
-          make -C "$scratch/smoke" -j2
-          name=rms-citron-audio-smoke
+          make -C "$scratch/smoke" -j2 RMS_HOME_MODE="$mode"
           cp "$scratch/smoke/$name.elf" "$scratch/smoke/$name.nro" \
             "$scratch/smoke/$name.map" "$output_dir/"
           cp "$source_dir/LICENSE.txt" "$output_dir/original-smoke-LICENSE.txt"
           aarch64-none-elf-readelf -h -l -S -s "$output_dir/$name.elf" > "$output_dir/readelf.txt"
           python3 "$recipe_dir/validate-artifacts.py" "$output_dir/$name.elf" \
-            "$output_dir/$name.nro" > "$output_dir/artifact-validation.json"
+            "$output_dir/$name.nro" "$mode" > "$output_dir/artifact-validation.json"
           (cd "$output_dir" && sha256sum "$name.elf" "$name.nro" "$name.map" > SHA256SUMS)
           printf '%s\n' 'BUILD_AND_STATIC_ARTIFACT_GATES_PASS_NO_RUNTIME_AUDIO_TEST'
           RMS_AUDIO_CONTAINER_RECIPE_EXACT
@@ -216,8 +271,13 @@ jobs:
           
           
           def main():
-              require(len(sys.argv) == 3, "usage: validate-artifacts.py ELF NRO")
-              elf_path, nro_path = map(Path, sys.argv[1:])
+              require(len(sys.argv) in (3, 4), "usage: validate-artifacts.py ELF NRO [audio|gpu-clear]")
+              mode = sys.argv[3] if len(sys.argv) == 4 else "audio"
+              require(mode in ("audio", "gpu-clear"), "unsupported control mode")
+              elf_path, nro_path = map(Path, sys.argv[1:3])
+              objects = {"__nx_heap_size", "pcm"} if mode == "audio" else {"__nx_heap_size"}
+              gpu_functions = {"__appInit", "__appExit", "dkDeviceCreate", "dkQueueSubmitCommands",
+                               "dkQueueAcquireImage", "dkQueuePresentImage", "dkCmdBufClearColor"} if mode == "gpu-clear" else set()
               elf, nro = elf_path.read_bytes(), nro_path.read_bytes()
               require(region(elf, 0, 7) == b"\x7fELF\x02\x01\x01", "not ELF64 little endian")
               header = struct.unpack("<16sHHIQQQIHHHHHH", region(elf, 0, 64))
@@ -245,10 +305,10 @@ jobs:
                           "<IBBHQQ", region(elf, offset, 24))
                       require(name_offset < len(strings), "symbol name outside string table")
                       name = strings[name_offset:].split(b"\0", 1)[0].decode("utf-8", errors="strict")
-                      if name in ("__nx_heap_size", "pcm") and section_index != 0:
+                      if name in objects | gpu_functions and section_index != 0:
                           require(name not in symbols, "duplicate required symbol")
                           symbols[name] = (info, section_index, value, size)
-              require(set(symbols) == {"__nx_heap_size", "pcm"}, "required symbols absent")
+              require(set(symbols) == objects | gpu_functions, "required control symbols absent")
           
               def writable_object(name):
                   info, section_index, address, size = symbols[name]
@@ -265,7 +325,7 @@ jobs:
                   return address, size
           
               writable_object("__nx_heap_size")
-              writable_object("pcm")
+              if mode == "audio": writable_object("pcm")
               heap_info, heap_section_index, heap_address, heap_size = symbols["__nx_heap_size"]
               require(heap_info >> 4 == 1 and heap_size == 8, "heap override not strong global size_t")
               require(heap_section_index < len(sections), "bad heap section")
@@ -276,9 +336,23 @@ jobs:
               # st_value is the symbol ADDRESS. Read the actual initialized 64-bit value.
               heap_value = struct.unpack("<Q", region(elf, heap_section[4] + heap_relative, 8))[0]
               require(heap_value == 0x04000000, "heap request is not 64 MiB")
-              _, _, pcm_address, pcm_size = symbols["pcm"]
-              require(pcm_address % 0x1000 == 0 and pcm_size == 0xA000, "PCM array alignment/size mismatch")
-              require((pcm_address + 0x5000) % 0x1000 == 0, "second PCM row unaligned")
+              pcm_address, pcm_size = None, None
+              if mode == "audio":
+                  _, _, pcm_address, pcm_size = symbols["pcm"]
+                  require(pcm_address % 0x1000 == 0 and pcm_size == 0xA000, "PCM array alignment/size mismatch")
+                  require((pcm_address + 0x5000) % 0x1000 == 0, "second PCM row unaligned")
+              else:
+                  for name in gpu_functions:
+                      info, index, address, size = symbols[name]
+                      require(info >> 4 == 1 and info & 0xF == 2 and 0 < index < len(sections) and size > 0,
+                              "required GPU entry is not a defined global function")
+                      section = sections[index]
+                      text_load = loads[0]
+                      require(section[2] & 6 == 6 and section[3] <= address <= section[3] + section[5] - size and
+                              text_load[1] & 1 and text_load[3] <= address <= text_load[3] + text_load[5] - size,
+                              "required GPU function outside executable text")
+                  require(b"rms-citron-gpu-clear-v1" in elf and b"rms-citron-gpu-clear-v1" in nro,
+                          "GPU control build identity absent")
           
               # NroStart is 0x10 bytes; official elf2nro's NroHeader follows it.
               require(region(nro, 0x10, 4) == b"NRO0", "NRO0 magic missing at 0x10")
@@ -314,7 +388,7 @@ jobs:
               expected_bss = (max(loads[2][6] - data_file_extent, 0) + 0xFFF) & ~0xFFF
               require(bss_size == expected_bss, "NRO BSS extent differs from ELF memory extent")
               data_memory_end = segments[2]["offset"] + segments[2]["size"] + bss_size
-              for name in ("__nx_heap_size", "pcm"):
+              for name in objects:
                   address, size = writable_object(name)
                   require(segments[2]["offset"] <= address <= data_memory_end - size,
                           "required object is not covered by NRO data/BSS: " + name)
@@ -323,25 +397,28 @@ jobs:
                   "elf_sha256": hashlib.sha256(elf).hexdigest(),
                   "nro_sha256": hashlib.sha256(nro).hexdigest(),
                   "elf_bytes": len(elf), "nro_bytes": len(nro),
-                  "aarch64": True, "heap_initial_value_bytes": heap_value,
+                  "control_mode": mode, "aarch64": True, "heap_initial_value_bytes": heap_value,
                   "heap_loader_override_still_possible": True,
                   "pcm_symbol_address": pcm_address, "pcm_total_bytes": pcm_size,
-                  "pcm_row_stride_bytes": 0x5000, "pcm_row_alignment_bytes": 0x1000,
+                  "pcm_row_stride_bytes": 0x5000 if mode == "audio" else None, "pcm_row_alignment_bytes": 0x1000 if mode == "audio" else None,
                   "nro_segments": segments, "nro_bss_bytes": bss_size,
                   "romfs_nacp_icon_added": False, "runtime_audio_test": False,
+                  "gpu_entry_functions": sorted(gpu_functions), "runtime_gpu_test": False,
+                  "shader_translation_test": False,
               }, indent=2))
           
           
           if __name__ == "__main__":
               main()
           RMS_AUDIO_VALIDATOR_EXACT
+          bash -n "$RMS_AUDIO_STAGE/recipe/build-in-container.sh"
           # These checks bind all readable inline copies to the reviewed local inputs.
           printf '%s\n' \
-            '913e9712c56ac3a0ad8633b9488a77cc11edc87effcd5d82984db0e00354bd78  source/source/main.c' \
-            'ab9d65cd418b676e6b3aad215346beb37090768269867eb9b2f322ff924e8e14  source/Makefile' \
-            'c5db20e2df97a0700e4d1567c665cc2fa339149eb31e6088f21047a35ff30320  source/LICENSE.txt' \
-            'a2dd24b81d936d617194a231131447b0628b6e14b492ff910bea7223234e014c  recipe/build-in-container.sh' \
-            'b5ddda226ee27158fa3faf5aa7b0727f6542c8784720ba4ec5d49e0175eed290  recipe/validate-artifacts.py' \
+            'fac69942c6abce19e9e57a7d5091507d598c3fdcbacce8637145263e61c9d618  source/source/main.c' \
+            'e760c8669579b44fed79f5d4a8d3cf44d6e1d1853bb59a9c745b618bce61f1d1  source/Makefile' \
+            '50d4fd67fc6103fe4ec1b8d3c08a30cb99a2603be0abda4d7b466f9380e78c2a  source/LICENSE.txt' \
+            'a032189405a290193852a633c1b104553df38a96b09a6627cbe72477cda19c67  recipe/build-in-container.sh' \
+            '13d0d9fc9b46c790a015fc55f417753daefa37d404eae757250c6fba870b6aba  recipe/validate-artifacts.py' \
             | (cd "$RMS_AUDIO_STAGE" && sha256sum --check --strict -)
 
       - name: Compile libnx and the original smoke inside the pinned disposable container
@@ -354,7 +431,7 @@ jobs:
           test ! -e "$RMS_AUDIO_STAGE/out/result"
           docker pull --platform linux/amd64 "$RMS_AUDIO_IMAGE"
           docker image inspect "$RMS_AUDIO_IMAGE" > "$RMS_AUDIO_STAGE/out/container-image-inspect.json"
-          docker run --rm --platform linux/amd64 --network bridge \
+          docker run --rm --platform linux/amd64 --network bridge --env RMS_HOME_MODE \
             --mount "type=bind,src=$RMS_AUDIO_STAGE/source,dst=/smoke,readonly" \
             --mount "type=bind,src=$RMS_AUDIO_STAGE/recipe,dst=/recipe,readonly" \
             --mount "type=bind,src=$RMS_AUDIO_STAGE/out,dst=/out" \
@@ -364,7 +441,7 @@ jobs:
       - name: Preserve the original smoke and static proof after successful gates
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1, same reviewed pin as Citron
         with:
-          name: RMS-Citron-original-audio-smoke-STATIC-ONLY
+          name: ${{ inputs.mode == 'gpu-clear' && 'RMS-Citron-gpu-clear-v1-STATIC-ONLY' || 'RMS-Citron-original-audio-smoke-STATIC-ONLY' }}
           path: ${{ runner.temp }}/rms-homebrew-audio-source-v1/out/
           if-no-files-found: error
           retention-days: 3
