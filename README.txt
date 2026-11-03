@@ -133,3 +133,23 @@ V14 local memory diagnostics (PID + six gauges; GC counters deferred):
   V13's512MiB cachetarget/32MiB stagingring, all GC policies, guestRAM, timing,
   dependencies, lifecycle and old probe counters remain unchanged. VMA blocksize
   preference remains unchanged. This candidate has not been built or device-tested.
+
+V15 private layout-sizing candidate (not built or device-tested):
+  For iOS/no-NCE layout-only NSO calls without NSO patches, retain the same
+  payload reads/decompression and actual resulting segment lengths, including
+  replacement/shrink, arguments, BSS and alignment. Avoid the unused program
+  image's allocations, copies and zero-fill during that pass. Real loading,
+  patch-present image materialization and NCE retain the normal image path.
+  HasNSOPatch is sampled earlier for layout-only calls. Filesystem scan, log and
+  exception timing can differ; concurrent mod-directory changes cannot have
+  identical timing across layout and real loading. Unsupported 32-bit size
+  overflow or oversized arguments are refused, without claiming parity with
+  invalid/OOM behavior.
+  The build script now compiles and runs the frozen C++ differential test of
+  the actual size helper on the Mac host immediately after patch application,
+  before iOS work. It compares 2056 bounded old-image cases plus boundaries.
+  This does not exercise the full loader or actual LZ4 decoder. The C++ test
+  has not been compiled/run for this candidate yet; Mac CI must pass it.
+  V14 diagnostics, memory policies, guest RAM, FPS/audio and lifecycle remain
+  unchanged. Title-specific allocation sizes and runtime savings are unmeasured;
+  this is an efficiency candidate, not a proven Mario crash or gameplay fix.

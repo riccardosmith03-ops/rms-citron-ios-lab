@@ -151,3 +151,11 @@ own-process identity and bounded allocation/cache gauges. UpstreamVMA3.1.0 field
 semantics were checked against official commit009ecd192c1289c7529bff248a16cfe896254816.
 The public carrier does not include the referenceheader, logs or private receipts.
 No memory-saving, compatibility or game-play result is claimed by this addition.
+
+V15 private layout-sizing candidate carries the GPL-2.0-or-later NSO size helper
+and its differential host test inside existing carrier paths. It avoids unused
+image materialization during eligible iOS layout-only calls while preserving
+payload reads/decompression and the normal loading path. Earlier patch-existence
+scans can change layout-call timing under concurrent mod-directory changes;
+unsupported overflow/oversized arguments are refused. No measured memory-saving,
+Mario stability, compatibility or game-play result is claimed by this candidate.

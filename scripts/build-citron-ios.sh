@@ -46,6 +46,16 @@ for name,digest in {'src/video_core/renderer_vulkan/vk_rasterizer.cpp': '0aab379
  assert hashlib.sha256(p.read_bytes()).hexdigest()==digest,'Unexpected iOS memory-diagnostics source: '+name
 PY_IOS_MEMORY_DIAGNOSTICS_BEFORE
 
+# Bind the layout-only NSO copy-elision input to the same fixed source revision.
+python3 - "$source_dir" <<'PY_IOS_NSO_LAYOUT_BEFORE'
+import hashlib,pathlib,sys
+r=pathlib.Path(sys.argv[1]).resolve(strict=True)
+p=r/'src/core/loader/nso.cpp'
+assert not p.is_symlink() and p.resolve(strict=True).is_relative_to(r)
+assert hashlib.sha256(p.read_bytes()).hexdigest()=='ec9d3f34ed31be08eec79f5ab6eb246ddd4a5628d5cefdc2687a7c5b6bc9a12b','Unexpected NSO loader source'
+assert not (r/'src/core/loader/nso_layout_size.h').exists(),'NSO layout helper already exists'
+PY_IOS_NSO_LAYOUT_BEFORE
+
 while IFS= read -r patch_name; do
     [[ -n "$patch_name" && "$patch_name" != \#* ]] || continue
     [[ "$patch_name" != */* && "$patch_name" == *.patch ]] || exit 5
@@ -54,6 +64,136 @@ while IFS= read -r patch_name; do
     git -C "$source_dir" apply --check "$patch_file"
     git -C "$source_dir" apply "$patch_file"
 done < "$project_dir/patches/series.txt"
+
+# The actual frozen size helper must pass its host differential test before iOS work.
+python3 - "$source_dir" <<'PY_IOS_NSO_LAYOUT_AFTER'
+import hashlib,pathlib,sys
+r=pathlib.Path(sys.argv[1]).resolve(strict=True)
+for name,digest in {'src/core/loader/nso.cpp':'1f5253d0f45be5bb692806cf5e5d0f2df750b8a6eadb8209ac3c03820858f3ef','src/core/loader/nso_layout_size.h':'ecdaabc7ae6f65d66e9f9e80abcb8377a748f211cf2daa37377c9f1daae3dc04'}.items():
+ p=r/name
+ assert not p.is_symlink() and p.resolve(strict=True).is_relative_to(r)
+ assert hashlib.sha256(p.read_bytes()).hexdigest()==digest,'Unexpected NSO layout-elision source: '+name
+PY_IOS_NSO_LAYOUT_AFTER
+mkdir -p "$deps/build"
+cat > "$deps/build/nso-layout-size-differential.cpp" <<'CPP_IOS_NSO_LAYOUT_DIFFERENTIAL'
+// SPDX-License-Identifier: GPL-2.0-or-later
+// Compile locally on a supported host; no emulator/game/device dependency.
+#include <array>
+#include <cassert>
+#include <cstdint>
+#include <cstring>
+#include <iostream>
+#include <limits>
+#include <vector>
+#include "core/loader/nso_layout_size.h"
+
+static_assert(sizeof(std::size_t) == 8, "iOS/Mac arm64 size_t domain");
+namespace {
+constexpr std::uint32_t Mask = 4095;
+constexpr std::uint32_t ArgReservation = 0x9000;
+constexpr std::size_t ArgHeader = 0x20;
+struct Segment { std::uint32_t location; std::vector<std::uint8_t> decoded; };
+struct Input {
+    std::array<Segment, 3> segments;
+    bool pass_arguments{};
+    std::size_t argument_size{};
+    std::uint32_t bss{};
+};
+std::uint32_t Align(std::uint32_t n) {
+    return static_cast<std::uint32_t>((n + std::uint64_t{Mask}) & ~std::uint64_t{Mask});
+}
+std::uint32_t Materialize(const Input& in) {
+    std::vector<std::uint8_t> image;
+    const std::size_t module_start = 0;
+    for (const auto& segment : in.segments) {
+        image.resize(module_start + segment.location +
+                     static_cast<std::uint32_t>(segment.decoded.size()));
+        if (!segment.decoded.empty()) {
+            std::memcpy(image.data() + module_start + segment.location,
+                        segment.decoded.data(), segment.decoded.size());
+        }
+    }
+    if (in.pass_arguments && in.argument_size != 0) {
+        const auto end_offset = image.size();
+        image.resize(static_cast<std::uint32_t>(image.size()) + ArgReservation);
+        // Exercise the same reserved extent without inventing upstream header values.
+        std::memset(image.data() + end_offset, 0x5a, ArgHeader + in.argument_size);
+    }
+    const auto result = Align(static_cast<std::uint32_t>(image.size()) + in.bss);
+    image.resize(result);
+    assert(image.size() <= (1U << 20));  // bounded reference materialization
+    return result;
+}
+void Compare(const Input& in) {
+    Loader::Detail::NsoLayoutSize size;
+    for (const auto& segment : in.segments) {
+        assert(size.ReplaceSegment(segment.location, segment.decoded.size()));
+    }
+    if (in.pass_arguments && in.argument_size != 0) {
+        assert(size.AppendArguments(in.argument_size, ArgReservation, ArgHeader));
+    }
+    const auto result = size.Finish(in.bss, Mask);
+    assert(result && *result == Materialize(in));
+}
+Input Fixture(std::array<std::uint32_t, 3> locations,
+              std::array<std::size_t, 3> actual_lengths,
+              bool args = false, std::size_t argument_size = 0, std::uint32_t bss = 0) {
+    Input in{};
+    for (std::size_t i = 0; i < 3; ++i) {
+        in.segments[i] = {locations[i], std::vector<std::uint8_t>(actual_lengths[i],
+                                                                std::uint8_t(i + 1))};
+    }
+    in.pass_arguments = args;
+    in.argument_size = argument_size;
+    in.bss = bss;
+    return in;
+}
+}
+int main() {
+    Compare(Fixture({0,4096,8192}, {31,1537,65}));
+    Compare(Fixture({0,4096,8192}, {0,0,0}, false, 0, 4097)); // short/failure result sizes
+    Compare(Fixture({0,4096,8192}, {2048,3,17}, true, 511, 7001));
+    Compare(Fixture({0,4096,8192}, {2048,3,17}, true, 0, 7001)); // no reservation
+    Compare(Fixture({32768,16384,0}, {5,3,1}, true, 8)); // shrink, not max
+    Compare(Fixture({0,100,10}, {512,32,7}, false, 0, 4095)); // overlaps
+    Compare(Fixture({0,0,0}, {0,0,0}));
+    Compare(Fixture({0,1,2}, {0,0,0}, true, ArgReservation-ArgHeader));
+    // Independent bounded old materialization, deterministic varied actual decode sizes.
+    std::uint32_t state = 0x12345678;
+    const auto next = [&state]() { state = state * 1664525U + 1013904223U; return state; };
+    for (unsigned i=0; i<2048; ++i) {
+        std::array<std::uint32_t,3> locations{};
+        std::array<std::size_t,3> sizes{};
+        for (std::size_t j=0; j<3; ++j) { locations[j]=next()%65536U; sizes[j]=next()%2049U; }
+        Compare(Fixture(locations, sizes, (next()&1U)!=0, next()%513U, next()%8193U));
+    }
+    Loader::Detail::NsoLayoutSize edge;
+    assert(edge.ReplaceSegment(0xffffe000U,0));
+    assert(edge.Finish(4096,Mask)==0xfffff000U);
+    assert(!edge.Finish(8192,Mask)); // aligned result 2^32, unsupported
+    assert(!edge.ReplaceSegment(0xffffffffU,1));
+    assert(!edge.ReplaceSegment(0,std::size_t{1}<<32));
+    assert(!edge.AppendArguments(1,ArgReservation,ArgHeader)); // size+reservation overflow
+    assert(edge.ReplaceSegment(0,0));
+    assert(!edge.AppendArguments(ArgReservation-ArgHeader+1,ArgReservation,ArgHeader));
+    assert(!edge.AppendArguments(0,1,ArgHeader));
+    assert(!edge.Finish(0,0));
+    assert(!edge.Finish(0,6));
+    assert(!edge.Finish(0,std::numeric_limits<std::uint64_t>::max()));
+    std::cout << "PASS_NSO_LAYOUT_COPY_ELISION_DIFFERENTIAL_2056_AND_BOUNDARIES\n";
+}
+CPP_IOS_NSO_LAYOUT_DIFFERENTIAL
+python3 - "$deps/build/nso-layout-size-differential.cpp" <<'PY_IOS_NSO_LAYOUT_TEST_PIN'
+import hashlib,pathlib,sys
+assert hashlib.sha256(pathlib.Path(sys.argv[1]).read_bytes()).hexdigest()=='a722562087fc7971ab497465a41256f37552445810c4170e947e203db30daa59','Frozen NSO differential test differs'
+PY_IOS_NSO_LAYOUT_TEST_PIN
+env -u SDKROOT -u IPHONEOS_DEPLOYMENT_TARGET -u CFLAGS -u CXXFLAGS -u CPPFLAGS -u LDFLAGS \
+    xcrun --sdk macosx clang++ -std=c++23 -UNDEBUG \
+    -isysroot "$(xcrun --sdk macosx --show-sdk-path)" \
+    -I "$source_dir/src" "$deps/build/nso-layout-size-differential.cpp" \
+    -o "$deps/build/nso-layout-size-differential-test"
+"$deps/build/nso-layout-size-differential-test"
+
 
 # Bind the two iOS-only memory-profile sources to the pinned revision.
 python3 - "$source_dir" <<'PY_IOS_MEMORY_PROFILE_AFTER'

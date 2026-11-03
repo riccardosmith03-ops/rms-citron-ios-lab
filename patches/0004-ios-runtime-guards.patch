@@ -1196,3 +1196,150 @@
  vk::Image MemoryAllocator::CreateImage(const VkImageCreateInfo& ci) const {
      const VmaAllocationCreateInfo alloc_ci = {
          .flags = VMA_ALLOCATION_CREATE_WITHIN_BUDGET_BIT,
+--- a/src/core/loader/nso.cpp
++++ b/src/core/loader/nso.cpp
+@@ -4,6 +4,7 @@
+ #include <cinttypes>
+ #include <cstring>
+ #include <exception>
++#include <limits>
+ #include <vector>
+ 
+ #include "common/common_funcs.h"
+@@ -19,6 +20,9 @@
+ #include "core/hle/kernel/k_process.h"
+ #include "core/hle/kernel/k_thread.h"
+ #include "core/loader/nso.h"
++#if defined(CITRON_IOS) && !defined(HAS_NCE)
++#include "core/loader/nso_layout_size.h"
++#endif
+ #include "core/memory.h"
+ 
+ #ifdef HAS_NCE
+@@ -106,6 +110,47 @@
+         return 0;
+     }();
+ 
++#if defined(CITRON_IOS) && !defined(HAS_NCE)
++    // Snapshot patch existence once for this layout call. The real load performs
++    // its normal later query again. This moves the layout-only mod scan earlier;
++    // it does not provide an atomic filesystem snapshot across layout and load.
++    std::optional<bool> layout_has_nso_patch;
++    if (!load_into_process) {
++        layout_has_nso_patch = pm && pm->HasNSOPatch(nso_header.build_id, nso_file.GetName());
++        if (!*layout_has_nso_patch) {
++            Detail::NsoLayoutSize layout;
++            bool layout_supported = true;
++            for (std::size_t i = 0; i < nso_header.segments.size(); ++i) {
++                std::vector<u8> data = nso_file.ReadBytes(nso_header.segments_compressed_size[i],
++                                                          nso_header.segments[i].offset);
++                if (nso_header.IsSegmentCompressed(i)) {
++                    data = DecompressSegment(data, nso_header.segments[i]);
++                }
++                // Keep the actual result size, including short reads/decode failures.
++                if (!layout.ReplaceSegment(nso_header.segments[i].location, data.size())) {
++                    layout_supported = false;
++                }
++            }
++            if (!layout_supported) {
++                return std::nullopt;
++            }
++            if (should_pass_arguments && !Settings::values.program_args.GetValue().empty()) {
++                const auto arg_data{Settings::values.program_args.GetValue()};
++                if (!layout.AppendArguments(arg_data.size(), NSO_ARGUMENT_DATA_ALLOCATION_SIZE,
++                                            sizeof(NSOArgumentHeader))) {
++                    return std::nullopt;
++                }
++            }
++            const auto layout_size =
++                layout.Finish(nso_header.segments[2].bss_size, Core::Memory::CITRON_PAGEMASK);
++            if (!layout_size || load_base > std::numeric_limits<VAddr>::max() - *layout_size) {
++                return std::nullopt;
++            }
++            return load_base + *layout_size;
++        }
++    }
++#endif
++
+     // Build program image
+     Kernel::CodeSet codeset;
+     Kernel::PhysicalMemory program_image;
+@@ -149,7 +194,11 @@
+ 
+     // Apply patches if necessary
+     const auto name = nso_file.GetName();
+-    const bool has_nso_patch = pm && pm->HasNSOPatch(nso_header.build_id, name);
++    const bool has_nso_patch =
++#if defined(CITRON_IOS) && !defined(HAS_NCE)
++        layout_has_nso_patch.has_value() ? *layout_has_nso_patch :
++#endif
++        pm && pm->HasNSOPatch(nso_header.build_id, name);
+     const bool should_patch_nso =
+         has_nso_patch || (load_into_process && Settings::values.dump_nso);
+     if (pm && should_patch_nso) {
+--- /dev/null
++++ b/src/core/loader/nso_layout_size.h
+@@ -0,0 +1,63 @@
++// SPDX-FileCopyrightText: Copyright 2026 RMS contributors
++// SPDX-License-Identifier: GPL-2.0-or-later
++#pragma once
++
++#include <cstddef>
++#include <cstdint>
++#include <limits>
++#include <optional>
++
++namespace Loader::Detail {
++
++// Size-only counterpart of the no-NCE NSO image resize sequence. Each segment
++// replaces the preceding size, including shrink; it is deliberately not max().
++// Segment payload reads/decompression stay in LoadModule. This helper owns no bytes.
++// Inputs whose materialization would overflow/truncate the 32-bit NSO image or
++// overrun its fixed argument reservation are refused, not treated as parity cases.
++class NsoLayoutSize final {
++public:
++    bool ReplaceSegment(std::uint32_t location, std::size_t decoded_size) noexcept {
++        if (decoded_size > MaxImageSize || location > MaxImageSize - decoded_size) {
++            return false;
++        }
++        size = static_cast<std::size_t>(location) +
++               static_cast<std::uint32_t>(decoded_size);
++        return true;
++    }
++
++    bool AppendArguments(std::size_t argument_size, std::uint32_t reservation,
++                         std::size_t header_size) noexcept {
++        if (header_size > reservation || argument_size > reservation - header_size ||
++            size > MaxImageSize - reservation) {
++            return false;
++        }
++        size = static_cast<std::uint32_t>(size) + reservation;
++        return true;
++    }
++
++    std::optional<std::uint32_t> Finish(std::uint32_t bss_size,
++                                      std::uint64_t page_mask) const noexcept {
++        if (size > MaxImageSize - bss_size || page_mask == 0 ||
++            page_mask == std::numeric_limits<std::uint64_t>::max() ||
++            (page_mask & (page_mask + 1)) != 0) {
++            return std::nullopt;
++        }
++        // Original addition is u32 before PageAlignSizeNSO widens for its u64 mask.
++        // Only its non-wrapping, representable domain is eligible for elision.
++        const auto unaligned = static_cast<std::uint32_t>(size) + bss_size;
++        const auto aligned = (static_cast<std::uint64_t>(unaligned) + page_mask) & ~page_mask;
++        if (aligned > MaxImageSize) {
++            return std::nullopt;
++        }
++        return static_cast<std::uint32_t>(aligned);
++    }
++
++    std::size_t Size() const noexcept { return size; }
++
++private:
++    static constexpr std::size_t MaxImageSize =
++        std::numeric_limits<std::uint32_t>::max();
++    std::size_t size{};
++};
++
++} // namespace Loader::Detail
