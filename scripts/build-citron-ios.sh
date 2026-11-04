@@ -97,7 +97,7 @@ import hashlib,pathlib,sys
 r=pathlib.Path(sys.argv[1]).resolve(strict=True)
 p=r/'src/common/ios_backing_probe.h'
 assert not p.is_symlink() and p.resolve(strict=True).is_relative_to(r)
-assert hashlib.sha256(p.read_bytes()).hexdigest()=='8a6defb7ed5e26e3c7388d44169d7d9601295a8ca895a7115a0de291df9585b9','Unexpected backing-residency helper'
+assert hashlib.sha256(p.read_bytes()).hexdigest()=='35e9259d8f75ae35a560995b4560577fc8702e866103d775eb85ff4da0d7d93e','Unexpected backing-residency helper'
 PY_IOS_BACKING_RESIDENCY_AFTER
 mkdir -p "$deps/build"
 cat > "$deps/build/ios-backing-residency-test.cpp" <<'CPP_IOS_BACKING_RESIDENCY_TEST'
@@ -110,6 +110,11 @@ cat > "$deps/build/ios-backing-residency-test.cpp" <<'CPP_IOS_BACKING_RESIDENCY_
 
 #if defined(__APPLE__)
 #include <sys/mman.h>
+#include <TargetConditionals.h>
+#if !TARGET_OS_IPHONE
+#include <mach/mach_vm.h>
+#include <type_traits>
+#endif
 #endif
 
 namespace B = Common::IOS::BackingProbe;
@@ -287,6 +292,46 @@ static void PurePolicy() {
 }
 
 #if defined(__APPLE__)
+#if !TARGET_OS_IPHONE
+// Test-only: macOS publishes the declaration. Compare the production binding
+// against that SDK type; production never includes this unsupported iPhone header.
+static_assert(std::is_same_v<B::PageRangeQueryFunction,
+                            decltype(&mach_vm_page_range_query)>);
+#endif
+
+static unsigned adapter_calls = 0;
+static bool adapter_success = false;
+static kern_return_t RecordingOwnQuery(vm_map_read_t task, mach_vm_offset_t address,
+        mach_vm_size_t bytes, mach_vm_address_t output, mach_vm_size_t* count) {
+    ++adapter_calls;
+    assert(task == mach_task_self() && address == Fixture::base && bytes == 3 * 4096);
+    assert(*count == 3);
+    if (!adapter_success) { *count = 2; return KERN_FAILURE; }
+    auto* values = reinterpret_cast<int*>(static_cast<std::uintptr_t>(output));
+    values[0] = B::Present; values[1] = B::PagedOut; values[2] = 0;
+    return KERN_SUCCESS;
+}
+
+static void NativeBindingPolicy() {
+    std::array<int, 3> output{};
+    const auto missing = B::CallOwnPageRangeQuery(nullptr, Fixture::base, 3 * 4096, output);
+    assert(missing.error == KERN_NOT_SUPPORTED && missing.count == 0 && adapter_calls == 0);
+    const auto no_sample = B::Scan(Fixture::base, 128 * 1024, 4096,
+        [](auto address, auto bytes, auto values) {
+            return B::CallOwnPageRangeQuery(nullptr, address, bytes, values);
+        }, [] { return true; }, [] { return std::uint64_t{0}; });
+    assert(no_sample.status == B::Status::CalibrationFailed &&
+           no_sample.native_error == KERN_NOT_SUPPORTED && no_sample.query_calls == 1 &&
+           no_sample.scanned_pages == 0 && no_sample.covered_bytes == 0);
+    const auto failed = B::CallOwnPageRangeQuery(RecordingOwnQuery, Fixture::base, 3 * 4096, output);
+    assert(failed.error == KERN_FAILURE && failed.count == 2 && adapter_calls == 1);
+    adapter_success = true;
+    const auto good = B::CallOwnPageRangeQuery(RecordingOwnQuery, Fixture::base, 3 * 4096, output);
+    assert(good.error == KERN_SUCCESS && good.count == 3 && adapter_calls == 2);
+    assert(output[0] == B::Present && output[1] == B::PagedOut && output[2] == 0);
+    std::puts("PASS_BACKING_PROBE_OWN_DYNAMIC_BINDING_POLICY_NOT_IOS_RUNTIME_PROOF");
+}
+
 static void NativeOwnMappingSmoke() {
     const auto page = B::HostPageBytes();
     assert(page == 4096 || page == 16384);
@@ -321,13 +366,14 @@ static void NativeOwnMappingSmoke() {
 int main() {
     PurePolicy();
 #if defined(__APPLE__)
+    NativeBindingPolicy();
     NativeOwnMappingSmoke();
 #endif
 }
 CPP_IOS_BACKING_RESIDENCY_TEST
 python3 - "$deps/build/ios-backing-residency-test.cpp" <<'PY_IOS_BACKING_RESIDENCY_TEST_PIN'
 import hashlib,pathlib,sys
-assert hashlib.sha256(pathlib.Path(sys.argv[1]).read_bytes()).hexdigest()=='2fad7963083110dbc57078d51b187ebb857ce718bdecb485b4e8756f66bd6738','Frozen backing-residency test differs'
+assert hashlib.sha256(pathlib.Path(sys.argv[1]).read_bytes()).hexdigest()=='0cdeb58cd224bbe55fc0e76a51256825d4e151251930d17069f41cc12b27feff','Frozen backing-residency test differs'
 PY_IOS_BACKING_RESIDENCY_TEST_PIN
 env -u SDKROOT -u IPHONEOS_DEPLOYMENT_TARGET -u CFLAGS -u CXXFLAGS -u CPPFLAGS -u LDFLAGS \
     xcrun --sdk macosx clang++ -std=c++23 -UNDEBUG -DCITRON_IOS=1 -pthread \
@@ -335,6 +381,16 @@ env -u SDKROOT -u IPHONEOS_DEPLOYMENT_TARGET -u CFLAGS -u CXXFLAGS -u CPPFLAGS -
     -I "$source_dir/src" "$deps/build/ios-backing-residency-test.cpp" \
     -o "$deps/build/ios-backing-residency-test"
 "$deps/build/ios-backing-residency-test"
+
+# Compile and link the actual diagnostic header/test for arm64 iPhoneOS 17.4.
+# The resulting iPhoneOS executable is an SDK compatibility check, never executed.
+env -u SDKROOT -u IPHONEOS_DEPLOYMENT_TARGET -u CFLAGS -u CXXFLAGS -u CPPFLAGS -u LDFLAGS \
+    xcrun --sdk iphoneos clang++ -std=c++23 -UNDEBUG -DCITRON_IOS=1 -pthread \
+    -arch arm64 -miphoneos-version-min=17.4 \
+    -isysroot "$(xcrun --sdk iphoneos --show-sdk-path)" \
+    -I "$source_dir/src" "$deps/build/ios-backing-residency-test.cpp" \
+    -o "$deps/build/ios-backing-residency-iphoneos-compile-link"
+echo PASS_IPHONEOS17_4_BACKING_PROBE_COMPILE_LINK_NOT_RUNTIME_PROOF
 
 # V17: bind the actual deferred lifecycle and run its real atomic policy test.
 python3 - "$source_dir" <<'PY_IOS_PROGRAM_SWITCH_AFTER'

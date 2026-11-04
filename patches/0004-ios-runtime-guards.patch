@@ -2035,3 +2035,55 @@ new file mode 100644
 +#endif
 +
 +} // namespace Common::IOS::BackingProbe
+--- a/src/common/ios_backing_probe.h
++++ b/src/common/ios_backing_probe.h
+@@ -12,7 +12,7 @@
+ 
+ #if defined(__APPLE__)
+ #include <mach/mach.h>
+-#include <mach/mach_vm.h>
++#include <dlfcn.h>
+ #include <mach/vm_statistics.h>
+ #include <unistd.h>
+ #endif
+@@ -168,14 +168,35 @@
+               PagedOut == VM_PAGE_QUERY_PAGE_PAGED_OUT && External == VM_PAGE_QUERY_PAGE_EXTERNAL &&
+               Reusable == VM_PAGE_QUERY_PAGE_REUSABLE);
+ 
++// The iPhone SDK rejects mach/mach_vm.h. The primary XNU MIG definition
++// specifies this wide ABI, and its local LP64 interface explicitly skips this
++// routine: do not invent a vm_map_page_range_query alias or a narrower count.
++using PageRangeQueryFunction = kern_return_t (*)(vm_map_read_t, mach_vm_offset_t,
++    mach_vm_size_t, mach_vm_address_t, mach_vm_size_t*);
++static_assert(sizeof(vm_map_read_t) == 4 && sizeof(kern_return_t) == 4 &&
++              sizeof(mach_vm_offset_t) == 8 && sizeof(mach_vm_size_t) == 8 &&
++              sizeof(mach_vm_address_t) == 8 && sizeof(std::uintptr_t) == 8);
++
++inline QueryReply CallOwnPageRangeQuery(PageRangeQueryFunction query,
++        std::uint64_t address, std::uint64_t bytes, std::span<int> output) noexcept {
++    // Optional metadata diagnostic only. Missing export is an explicit failure,
++    // never a successful zero sample. This binding accepts no remote task port.
++    if (query == nullptr) return {KERN_NOT_SUPPORTED, 0};
++    mach_vm_size_t count = output.size();
++    const auto error = query(mach_task_self(), static_cast<mach_vm_offset_t>(address),
++        static_cast<mach_vm_size_t>(bytes),
++        static_cast<mach_vm_address_t>(reinterpret_cast<std::uintptr_t>(output.data())), &count);
++    return {static_cast<int>(error), count};
++}
++
+ struct NativeQuery final {
+     QueryReply operator()(std::uint64_t address, std::uint64_t bytes,
+                           std::span<int> output) const noexcept {
+-        mach_vm_size_t count = output.size();
+-        const auto error = mach_vm_page_range_query(mach_task_self(), address, bytes,
+-            static_cast<mach_vm_address_t>(reinterpret_cast<std::uintptr_t>(output.data())),
+-            &count);
+-        return {static_cast<int>(error), count};
++        // Resolve only this allowlisted system symbol. No unsupported SDK header,
++        // manual MIG message, external library loading or task discovery is used.
++        static const auto query = reinterpret_cast<PageRangeQueryFunction>(
++            dlsym(RTLD_DEFAULT, "mach_vm_page_range_query"));
++        return CallOwnPageRangeQuery(query, address, bytes, output);
+     }
+ };
+ 

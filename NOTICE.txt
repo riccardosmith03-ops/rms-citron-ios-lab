@@ -190,3 +190,10 @@ V18 read-only own-backing attribution diagnostic:
   are retained. This adds numeric implementation diagnostics, not guest content,
   raw addresses, keys, device reports, media or account data. It changes neither
   guest capacity nor live-memory discard policy and proves no RAM/crash fix.
+
+
+V18 backing-probe SDK compatibility repair:
+  Header/test adaptation and the early arm64 iPhoneOS17.4 compile/link gate retain
+  the existing GPL-2.0-or-later source notices. The iPhoneOS check is not executed.
+  Native session and RAM/resource policies are unchanged. No device data, guest
+  content, media, keys or account information are part of this source revision.

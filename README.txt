@@ -1,3 +1,20 @@
+V18 PRIVATE SDK-COMPATIBILITY FIX CANDIDATE - NOT BUILT OR DEVICE TESTED
+This revision adjusts the backing-probe header and its actual-header test for
+the iPhoneOS SDK. Before the full application configure/compile, the build now
+compiles and links that same header/test for arm64 iPhoneOS with deployment17.4.
+The iPhoneOS check executable is never run. Its marker proves compile/link only.
+All eight prior host test gates remain; the standard Mac workflow is unchanged.
+The optional query resolves only the allowlisted mach_vm_page_range_query symbol
+with dlsym and always supplies mach_task_self(). A missing export produces an
+explicit nonzero diagnostic failure, never a successful zero-memory sample.
+Actual iOS export availability and query access remain unverified until a device
+test; a successful compile/link check does not prove either at runtime.
+
+The native session, sampling schedule, guest memory, GPU policy and signature
+inputs remain unchanged. This SDK repair proves no RAM reduction or game fix.
+The public inventory remains the same nineteen source/license/build paths.
+Historical implementation notes follow.
+
 V18 PRIVATE OWN-BACKING ATTRIBUTION SOURCE CANDIDATE - NOT BUILT OR DEVICE TESTED
 This read-only diagnostic samples only the emulator's known owned guest-backing
 range. It records bounded numeric page-disposition counts and explicit coverage,
