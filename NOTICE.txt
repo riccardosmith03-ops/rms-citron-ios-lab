@@ -159,3 +159,15 @@ payload reads/decompression and the normal loading path. Earlier patch-existence
 scans can change layout-call timing under concurrent mod-directory changes;
 unsupported overflow/oversized arguments are refused. No measured memory-saving,
 Mario stability, compatibility or game-play result is claimed by this candidate.
+
+
+V16 iOS VMA preferred-block-size experiment:
+  Retain upstream GPL notices in vulkan_device.cpp and change only the CITRON_IOS
+  preferredLargeHeapBlockSize initializer to64 MiB. Non-iOS keeps0/VMA's default.
+  Upstream VulkanMemoryAllocator3.1.0 (commit009ecd192c1289c7529bff248a16cfe896254816)
+  retains its MIT license and source. No VMA source is modified or copied into
+  this carrier. Existing resource sizes, flags, lifetime/synchronization, GC,
+  guest RAM and the nineteen-file public inventory remain unchanged.
+  Smaller block and dedicated-allocation heuristics can affect allocation count,
+  overhead or fragmentation. No measured RAM-saving, Mario stability or gameplay
+  result is established by this source experiment.

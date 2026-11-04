@@ -1,3 +1,23 @@
+V16 PRIVATE iOS VMA64 SOURCE CANDIDATE — NOT BUILT OR DEVICE TESTED
+The only new runtime policy in this candidate is CITRON_IOS's Vulkan allocator
+preferredLargeHeapBlockSize=64 MiB. Other platforms retain0, selecting VMA3.1's
+default256 MiB for large heaps. This is a preferred block quantum, not a hard
+memory cap; resource allocation sizes, guest RAM, GC thresholds, dirty readbacks,
+retirement/fence lifetimes, staging ring, FPS, audio and lifecycle are unchanged.
+V15's layout-copy-elision and the existing five host tests remain byte-for-byte
+in this carrier; the separate NSO direct-decode experiment is not included.
+
+Smaller blocks may reduce overreservation or empty-block retention, while increasing
+allocation count, allocator/driver overhead or fragmentation. VMA's preferred
+dedicated-allocation cutoff changes from half256=128 MiB to half64=32 MiB for
+affected default pools; this is a heuristic with existing allocation fallbacks.
+It does not resize or truncate resources. Heap-size-based small-pool behavior and
+driver-required dedicated allocations remain VMA's existing policy. VMA statistics
+for blockBytes-allocationBytes are not measured process-residency savings.
+No memory reduction, Mario crash fix or stable commercial gameplay is claimed.
+Real Mac compilation, artifact review and controlled on-device measurements are
+still required. The historical design notes below describe earlier additions.
+
 Citron iPhoneOS prototype - portable build carrier V10 lifecycle candidate
 
 V9 was built and installed on an iPhone 11. Original homebrew checksum and

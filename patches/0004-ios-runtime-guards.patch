@@ -1343,3 +1343,18 @@
 +};
 +
 +} // namespace Loader::Detail
+--- a/src/video_core/vulkan_common/vulkan_device.cpp
++++ b/src/video_core/vulkan_common/vulkan_device.cpp
+@@ -785,7 +785,12 @@
+         .flags = allocator_flags,
+         .physicalDevice = physical,
+         .device = *logical,
++#if defined(CITRON_IOS)
++        // Reduce allocator block overreservation on iOS without changing resource sizes.
++        .preferredLargeHeapBlockSize = 64ULL << 20,
++#else
+         .preferredLargeHeapBlockSize = 0,
++#endif
+         .pAllocationCallbacks = nullptr,
+         .pDeviceMemoryCallbacks = nullptr,
+         .pHeapSizeLimit = nullptr,

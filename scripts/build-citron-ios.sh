@@ -56,6 +56,15 @@ assert hashlib.sha256(p.read_bytes()).hexdigest()=='ec9d3f34ed31be08eec79f5ab6eb
 assert not (r/'src/core/loader/nso_layout_size.h').exists(),'NSO layout helper already exists'
 PY_IOS_NSO_LAYOUT_BEFORE
 
+# Bind the iOS-only VMA preferred-block-size source to the pinned revision.
+python3 - "$source_dir" <<'PY_IOS_VMA_BLOCK64_BEFORE'
+import hashlib,pathlib,sys
+r=pathlib.Path(sys.argv[1]).resolve(strict=True)
+p=r/'src/video_core/vulkan_common/vulkan_device.cpp'
+assert not p.is_symlink() and p.resolve(strict=True).is_relative_to(r)
+assert hashlib.sha256(p.read_bytes()).hexdigest()=='4d79373e7660779ae85a352b580a6650303b7f32e4a636bb7e30b4b2a1a82956','Unexpected iOS VMA block preference source'
+PY_IOS_VMA_BLOCK64_BEFORE
+
 while IFS= read -r patch_name; do
     [[ -n "$patch_name" && "$patch_name" != \#* ]] || continue
     [[ "$patch_name" != */* && "$patch_name" == *.patch ]] || exit 5
@@ -64,6 +73,15 @@ while IFS= read -r patch_name; do
     git -C "$source_dir" apply --check "$patch_file"
     git -C "$source_dir" apply "$patch_file"
 done < "$project_dir/patches/series.txt"
+
+# Bind the iOS-only VMA preferred-block-size source to the pinned revision.
+python3 - "$source_dir" <<'PY_IOS_VMA_BLOCK64_AFTER'
+import hashlib,pathlib,sys
+r=pathlib.Path(sys.argv[1]).resolve(strict=True)
+p=r/'src/video_core/vulkan_common/vulkan_device.cpp'
+assert not p.is_symlink() and p.resolve(strict=True).is_relative_to(r)
+assert hashlib.sha256(p.read_bytes()).hexdigest()=='a55faa4a60349b81b012029013518803c3ba9212450273d98d7ce9b909a7df7e','Unexpected iOS VMA block preference source'
+PY_IOS_VMA_BLOCK64_AFTER
 
 # The actual frozen size helper must pass its host differential test before iOS work.
 python3 - "$source_dir" <<'PY_IOS_NSO_LAYOUT_AFTER'
