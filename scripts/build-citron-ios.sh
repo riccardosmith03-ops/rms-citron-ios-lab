@@ -75,6 +75,13 @@ assert hashlib.sha256(p.read_bytes()).hexdigest()=='f42a3505492ab14a1af0cc803460
 assert not (r/'src/ios/deferred_program_switch.h').exists(),'Deferred program-switch helper already exists'
 PY_IOS_PROGRAM_SWITCH_BEFORE
 
+# V18 diagnostic helper must be absent in the fixed pristine source.
+python3 - "$source_dir" <<'PY_IOS_BACKING_RESIDENCY_BEFORE'
+import pathlib,sys
+r=pathlib.Path(sys.argv[1]).resolve(strict=True)
+assert not (r/'src/common/ios_backing_probe.h').exists(),'Backing-residency helper already exists'
+PY_IOS_BACKING_RESIDENCY_BEFORE
+
 while IFS= read -r patch_name; do
     [[ -n "$patch_name" && "$patch_name" != \#* ]] || continue
     [[ "$patch_name" != */* && "$patch_name" == *.patch ]] || exit 5
@@ -84,11 +91,256 @@ while IFS= read -r patch_name; do
     git -C "$source_dir" apply "$patch_file"
 done < "$project_dir/patches/series.txt"
 
+# V18: read-only own-backing attribution; real header and host API tests gate the build.
+python3 - "$source_dir" <<'PY_IOS_BACKING_RESIDENCY_AFTER'
+import hashlib,pathlib,sys
+r=pathlib.Path(sys.argv[1]).resolve(strict=True)
+p=r/'src/common/ios_backing_probe.h'
+assert not p.is_symlink() and p.resolve(strict=True).is_relative_to(r)
+assert hashlib.sha256(p.read_bytes()).hexdigest()=='8a6defb7ed5e26e3c7388d44169d7d9601295a8ca895a7115a0de291df9585b9','Unexpected backing-residency helper'
+PY_IOS_BACKING_RESIDENCY_AFTER
+mkdir -p "$deps/build"
+cat > "$deps/build/ios-backing-residency-test.cpp" <<'CPP_IOS_BACKING_RESIDENCY_TEST'
+// SPDX-FileCopyrightText: Copyright 2026 Citron Emulator Project
+// SPDX-License-Identifier: GPL-2.0-or-later
+#include "common/ios_backing_probe.h"
+
+#include <cassert>
+#include <cstdio>
+
+#if defined(__APPLE__)
+#include <sys/mman.h>
+#endif
+
+namespace B = Common::IOS::BackingProbe;
+
+struct Fixture {
+    static constexpr std::uint64_t base = 0x100000000ULL;
+    std::uint64_t origin = base;
+    std::uint64_t bytes = 128 * 1024, page = 4096, clock = 0, advance = 0;
+    unsigned calls = 0, error_call = 0, short_call = 0, large_call = 0;
+    unsigned cancel_call = 0, advance_call = 0;
+    bool running = true;
+    std::uint64_t calibration_override = 0;
+
+    B::QueryReply Query(std::uint64_t address, std::uint64_t size, std::span<int> out) {
+        ++calls;
+        assert(address >= origin && address - origin <= bytes &&
+               size <= bytes - (address - origin));
+        assert(address % page == 0 && size % page == 0);
+        const auto count = size / page;
+        assert(count <= out.size());
+        if (calls == cancel_call) running = false;
+        if (calls == advance_call) clock += advance;
+        if (calls == error_call) return {17, 0};
+        if (calls == short_call) return {0, count - 1};
+        if (calls == large_call) return {0, count + 1};
+        if (calls == 1 && calibration_override) return {0, calibration_override};
+        constexpr std::array<std::uint32_t, 4> flags{
+            0, B::Present, B::PagedOut,
+            B::Present | B::PagedOut | B::Dirty | B::Reusable | B::External | 0x10000};
+        for (std::size_t i = 0; i < count; ++i)
+            out[i] = static_cast<int>(flags[((address - origin) / page + i) % flags.size()]);
+        return {0, count};
+    }
+    B::Result Run(std::uint64_t host_page = 4096, std::uint64_t address = base) {
+        return B::Scan(address, bytes, host_page,
+            [&](auto a, auto s, auto out) { return Query(a, s, out); },
+            [&] { return running; }, [&] { return clock; });
+    }
+};
+
+static void PurePolicy() {
+    for (const auto page : {4096ULL, 16384ULL}) {
+        Fixture f;
+        f.page = page;
+        f.bytes = 32 * page;
+        const auto r = f.Run(page);
+        assert(r.status == B::Status::Complete && r.query_page_bytes == page);
+        assert(r.covered_bytes == f.bytes && r.scanned_pages == 32 && r.query_calls == 2);
+        assert(r.present_pages == 16 && r.paged_out_pages == 16 && r.both_pages == 8);
+        assert(r.neither_pages == 8 && r.zero_disposition_pages == 8 &&
+               r.dirty_pages == 8 && r.reusable_pages == 8 &&
+               r.external_pages == 8 && r.unknown_flag_pages == 8);
+        assert(r.present_pages + r.paged_out_pages - r.both_pages + r.neither_pages ==
+               r.scanned_pages); // Flags overlap; never sum them as physical bytes.
+    }
+    {
+        Fixture f;
+        f.bytes = (B::ChunkPages + 17) * f.page;
+        const auto r = f.Run(16384); // Simulate 4 KiB effective pages on a 16 KiB host.
+        // This byte count is not host-page aligned; correct refusal precedes querying.
+        assert(r.status == B::Status::InvalidRange && f.calls == 0);
+        f.bytes = (B::ChunkPages + 20) * f.page;
+        const auto calibrated = f.Run(16384);
+        assert(calibrated.status == B::Status::Complete && calibrated.query_page_bytes == 4096);
+        assert(calibrated.scanned_pages == B::ChunkPages + 20 && calibrated.query_calls == 3);
+    }
+    for (const auto failure : {1, 2, 3}) {
+        Fixture f;
+        f.bytes = (B::ChunkPages + 17) * f.page;
+        f.error_call = failure;
+        const auto r = f.Run();
+        assert(r.status == (failure == 1 ? B::Status::CalibrationFailed : B::Status::QueryFailed));
+        assert(r.native_error == 17 && r.query_calls == failure);
+        assert(r.scanned_pages == (failure == 3 ? B::ChunkPages : 0));
+        assert(r.covered_bytes == r.scanned_pages * f.page);
+    }
+    {
+        Fixture f;
+        f.page = 16384;
+        f.origin = Fixture::base + 4096;
+        const auto r = f.Run(4096, f.origin); // Larger effective granularity.
+        // Calibration is aligned inside this borrowed owner; the full-range
+        // query is then refused because its start would round outside the owner.
+        assert(r.status == B::Status::InvalidQueryGranularity && f.calls == 1);
+        assert(r.covered_bytes == 0 && r.scanned_pages == 0);
+    }
+    for (const bool too_large : {false, true}) {
+        Fixture f;
+        f.bytes = (B::ChunkPages + 17) * f.page;
+        if (too_large) f.large_call = 3; else f.short_call = 3;
+        const auto r = f.Run();
+        assert(r.status == B::Status::UnexpectedCount && r.query_calls == 3);
+        assert(r.scanned_pages == B::ChunkPages && r.covered_bytes == B::ChunkPages * f.page);
+    }
+    for (const auto count : {2ULL, 3ULL, 4097ULL}) {
+        Fixture f;
+        f.calibration_override = count;
+        assert(f.Run().status == B::Status::InvalidQueryGranularity);
+        assert(f.calls == 1);
+    }
+    {
+        Fixture f;
+        f.short_call = 1; // 15 does not divide the 64 KiB calibration length.
+        assert(f.Run().status == B::Status::InvalidQueryGranularity);
+    }
+    {
+        Fixture f;
+        f.running = false;
+        const auto r = f.Run();
+        assert(r.status == B::Status::Cancelled && f.calls == 0 && r.covered_bytes == 0);
+    }
+    for (const auto call : {1U, 2U}) {
+        Fixture f;
+        f.bytes = (B::ChunkPages + 17) * f.page;
+        f.cancel_call = call;
+        const auto r = f.Run();
+        assert(r.status == B::Status::Cancelled && r.query_calls == call);
+        assert(r.scanned_pages == (call == 2 ? B::ChunkPages : 0));
+    }
+    for (const auto call : {1U, 2U}) {
+        Fixture f;
+        f.bytes = (B::ChunkPages + 17) * f.page;
+        f.advance_call = call;
+        f.advance = B::BudgetUs;
+        const auto r = f.Run();
+        assert(r.status == B::Status::BudgetExceeded && r.query_calls == call);
+        assert(r.elapsed_us == B::BudgetUs);
+        assert(r.scanned_pages == (call == 2 ? B::ChunkPages : 0));
+    }
+    for (const auto bytes : std::array<std::uint64_t, 5>{0, 4096, B::CalibrationBytes - 1,
+                            B::MaxBackingBytes + 4096, 65537}) {
+        Fixture f;
+        f.bytes = bytes;
+        assert(f.Run().status == B::Status::InvalidRange && f.calls == 0);
+    }
+    for (const auto address : std::array<std::uint64_t, 3>{0, Fixture::base + 1,
+         std::numeric_limits<std::uint64_t>::max() & ~std::uint64_t{4095}}) {
+        Fixture f;
+        assert(f.Run(4096, address).status == B::Status::InvalidRange && f.calls == 0);
+    }
+    {
+        Fixture f;
+        assert(f.Run(8192).status == B::Status::InvalidHostPageSize && f.calls == 0);
+    }
+    {
+        unsigned clocks = 0, calls = 0;
+        const auto r = B::Scan(Fixture::base, 128 * 1024, 4096,
+            [&](auto, auto, auto) { ++calls; return B::QueryReply{}; },
+            [] { return true; }, [&] { return clocks++ ? B::BudgetUs : 0; });
+        assert(r.status == B::Status::BudgetExceeded && calls == 0);
+    }
+    {
+        Fixture f;
+        f.bytes = B::MaxBackingBytes;
+        const auto r = f.Run();
+        assert(r.status == B::Status::Complete && r.query_calls == 257);
+        assert(r.covered_bytes == B::MaxBackingBytes && r.scanned_pages == 1048576);
+    }
+    {
+        B::Schedule s;
+        assert(s.TakeDue(4999999) == 0 && s.TakeDue(5000000) == 5);
+        assert(s.TakeDue(5000001) == 0 && s.TakeDue(10000000) == 10);
+        assert(s.TakeDue(20000000) == 20 && s.TakeDue(30000000) == 30);
+        assert(s.TakeDue(44999999) == 0 && s.TakeDue(45000000) == 45);
+        assert(s.TakeDue(60000000) == 60 && s.TakeDue(90000000) == 90);
+        assert(s.TakeDue(119999999) == 0 && s.TakeDue(120000000) == 120);
+        assert(s.TakeDue(std::numeric_limits<std::uint64_t>::max()) == 0);
+        B::Schedule late;
+        assert(late.TakeDue(29999999) == 20 && late.TakeDue(29999999) == 0);
+        assert(late.TakeDue(30000000) == 30 && late.TakeDue(40000000) == 0);
+        assert(late.TakeDue(100000000) == 90 && late.TakeDue(100000000) == 0);
+        assert(late.TakeDue(120000000) == 120 && late.TakeDue(180000000) == 0);
+    }
+    std::puts("PASS_BACKING_PROBE_ACTUAL_HEADER_POLICY_NOT_IOS_RUNTIME_PROOF");
+}
+
+#if defined(__APPLE__)
+static void NativeOwnMappingSmoke() {
+    const auto page = B::HostPageBytes();
+    assert(page == 4096 || page == 16384);
+    constexpr std::uint64_t bytes = 8 * 1024 * 1024;
+    void* allocation = mmap(nullptr, bytes, PROT_READ | PROT_WRITE,
+                            MAP_PRIVATE | MAP_ANON, -1, 0);
+    assert(allocation != MAP_FAILED);
+    const auto base = static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(allocation));
+    const auto run = [&] {
+        return B::Scan(base, bytes, page, B::NativeQuery{}, [] { return true; }, B::NowUs);
+    };
+    const auto before = run();
+    assert(before.status == B::Status::Complete && before.covered_bytes == bytes);
+    assert(before.query_page_bytes == 4096 || before.query_page_bytes == 16384);
+    // Only this test writes its own newly allocated pages; the production scanner
+    // never reads guest data and never deliberately faults in guest pages.
+    auto* own = static_cast<volatile unsigned char*>(allocation);
+    own[0] = 0x29;
+    own[bytes / 2] = 0x4a;
+    own[bytes - page] = 0x6d;
+    const auto after = run();
+    assert(after.status == B::Status::Complete && after.covered_bytes == bytes);
+    assert(after.scanned_pages == bytes / after.query_page_bytes && after.present_pages >= 3);
+    assert(own[0] == 0x29 && own[bytes / 2] == 0x4a && own[bytes - page] == 0x6d);
+    const auto task = B::OwnTaskMemory();
+    assert(task.error == 0 && task.resident_bytes != 0 && task.footprint_bytes != 0);
+    assert(munmap(allocation, bytes) == 0);
+    std::puts("PASS_HOST_MAC_OWN_BACKING_QUERY_NOT_IOS_RUNTIME_PROOF");
+}
+#endif
+
+int main() {
+    PurePolicy();
+#if defined(__APPLE__)
+    NativeOwnMappingSmoke();
+#endif
+}
+CPP_IOS_BACKING_RESIDENCY_TEST
+python3 - "$deps/build/ios-backing-residency-test.cpp" <<'PY_IOS_BACKING_RESIDENCY_TEST_PIN'
+import hashlib,pathlib,sys
+assert hashlib.sha256(pathlib.Path(sys.argv[1]).read_bytes()).hexdigest()=='2fad7963083110dbc57078d51b187ebb857ce718bdecb485b4e8756f66bd6738','Frozen backing-residency test differs'
+PY_IOS_BACKING_RESIDENCY_TEST_PIN
+env -u SDKROOT -u IPHONEOS_DEPLOYMENT_TARGET -u CFLAGS -u CXXFLAGS -u CPPFLAGS -u LDFLAGS \
+    xcrun --sdk macosx clang++ -std=c++23 -UNDEBUG -DCITRON_IOS=1 -pthread \
+    -isysroot "$(xcrun --sdk macosx --show-sdk-path)" \
+    -I "$source_dir/src" "$deps/build/ios-backing-residency-test.cpp" \
+    -o "$deps/build/ios-backing-residency-test"
+"$deps/build/ios-backing-residency-test"
+
 # V17: bind the actual deferred lifecycle and run its real atomic policy test.
 python3 - "$source_dir" <<'PY_IOS_PROGRAM_SWITCH_AFTER'
 import hashlib,pathlib,sys
 r=pathlib.Path(sys.argv[1]).resolve(strict=True)
-for name,digest in {'src/ios/native.cpp':'efe47d7217e1b834dac0c2ca3dba41f4dd02d32f13a6c60d5013707ff0abe7b3','src/ios/native.h':'937da682e97bd810db2d622f531a5bfb4c04d9ac1f273ca41a61339966585ff5','src/ios/deferred_program_switch.h':'653c628d96a6364378797ed87efca582a072ec19af4f3999e8946576c1424fac'}.items():
+for name,digest in {'src/ios/native.cpp':'9e5955ade24205139d1ac26070c65fa2ae7a76feb0bdaf4bc1c8fb34e9962975','src/ios/native.h':'937da682e97bd810db2d622f531a5bfb4c04d9ac1f273ca41a61339966585ff5','src/ios/deferred_program_switch.h':'653c628d96a6364378797ed87efca582a072ec19af4f3999e8946576c1424fac'}.items():
  p=r/name
  assert not p.is_symlink() and p.resolve(strict=True).is_relative_to(r)
  assert hashlib.sha256(p.read_bytes()).hexdigest()==digest,'Unexpected V17 program-switch source: '+name
@@ -366,7 +618,7 @@ PY_IOS_MEMORY_DIAGNOSTICS_AFTER
 python3 - "$source_dir" <<'PY_IOS_RENDER_PROBE_AFTER'
 import hashlib,pathlib,sys
 r=pathlib.Path(sys.argv[1]).resolve(strict=True)
-for name,digest in {'src/ios/native.cpp': 'efe47d7217e1b834dac0c2ca3dba41f4dd02d32f13a6c60d5013707ff0abe7b3', 'src/ios/emu_window/emu_window.cpp': 'f12d486c2bc2c6744ef4b58fcd68f6b9fa3c13b618cf2d4cce11d3d09291410a', 'src/core/hle/service/nvdrv/devices/nvhost_gpu.cpp': 'b4100833090b1c8069eb56b026de4935e3b9cbd8258f97bc8cf96eb342278308', 'src/video_core/gpu_thread.cpp': '68a0dae863b143765d968598c760193b4f0d034e46590c970faa16b40ca18d14', 'src/core/hle/service/nvnflinger/buffer_queue_producer.cpp': 'a308d2b1f86d40ef0739a0a9043a4b48fe24b20f5c77deb61f47c1253b029b94', 'src/core/hle/service/nvnflinger/hardware_composer.cpp': '16452f72b00f005d5c98abfa24fc2e2bcf8ef9eaa06abfbd5734c57c417efa6d', 'src/video_core/gpu.cpp': 'bf00efab550e4528d07b639a2a886e1f99ee34cfa5910c17a8951c8c2fa885ee', 'src/video_core/renderer_vulkan/renderer_vulkan.cpp': '5fac00a19a35dd09554e7a255257eabeecaef2415a65b9f41c67ab69055a9578', 'src/video_core/renderer_vulkan/vk_present_manager.cpp': '2b9eb2464bc3eb4a4683c0d0b5a9a6522b78efdfaae7da95a22dd24860d83108', 'src/core/device_memory_manager.inc': '9202e645c29abfbf8c0ae81cec8b5445d79b8d84f45ff77219173a3e14772509', 'src/ios/jit_icache_callbacks_ios.cpp': '5a06b39329d23a189fc40fbb454b2b86dd1b6ec117d3a55e5fb2b5ae1c64f939', 'src/common/ios_render_probe.h': '10d747d48e4c21275a7d74909b5032e263008231a889e98002517e903151b52d'}.items():
+for name,digest in {'src/ios/native.cpp': '9e5955ade24205139d1ac26070c65fa2ae7a76feb0bdaf4bc1c8fb34e9962975', 'src/ios/emu_window/emu_window.cpp': 'f12d486c2bc2c6744ef4b58fcd68f6b9fa3c13b618cf2d4cce11d3d09291410a', 'src/core/hle/service/nvdrv/devices/nvhost_gpu.cpp': 'b4100833090b1c8069eb56b026de4935e3b9cbd8258f97bc8cf96eb342278308', 'src/video_core/gpu_thread.cpp': '68a0dae863b143765d968598c760193b4f0d034e46590c970faa16b40ca18d14', 'src/core/hle/service/nvnflinger/buffer_queue_producer.cpp': 'a308d2b1f86d40ef0739a0a9043a4b48fe24b20f5c77deb61f47c1253b029b94', 'src/core/hle/service/nvnflinger/hardware_composer.cpp': '16452f72b00f005d5c98abfa24fc2e2bcf8ef9eaa06abfbd5734c57c417efa6d', 'src/video_core/gpu.cpp': 'bf00efab550e4528d07b639a2a886e1f99ee34cfa5910c17a8951c8c2fa885ee', 'src/video_core/renderer_vulkan/renderer_vulkan.cpp': '5fac00a19a35dd09554e7a255257eabeecaef2415a65b9f41c67ab69055a9578', 'src/video_core/renderer_vulkan/vk_present_manager.cpp': '2b9eb2464bc3eb4a4683c0d0b5a9a6522b78efdfaae7da95a22dd24860d83108', 'src/core/device_memory_manager.inc': '9202e645c29abfbf8c0ae81cec8b5445d79b8d84f45ff77219173a3e14772509', 'src/ios/jit_icache_callbacks_ios.cpp': '5a06b39329d23a189fc40fbb454b2b86dd1b6ec117d3a55e5fb2b5ae1c64f939', 'src/common/ios_render_probe.h': '10d747d48e4c21275a7d74909b5032e263008231a889e98002517e903151b52d'}.items():
  p=r/name
  assert not p.is_symlink() and p.resolve(strict=True).is_relative_to(r)
  assert hashlib.sha256(p.read_bytes()).hexdigest()==digest,'Unexpected render-probe source: '+name
@@ -393,12 +645,12 @@ for name,digest in expected_api.items():
  assert hashlib.sha256(p.read_bytes()).hexdigest()==digest, 'Unexpected pinned filesystem API: '+name
 p=root/'src/ios/native.cpp'
 assert not p.is_symlink() and p.resolve(strict=True).is_relative_to(root)
-assert hashlib.sha256(p.read_bytes()).hexdigest()=='efe47d7217e1b834dac0c2ca3dba41f4dd02d32f13a6c60d5013707ff0abe7b3', 'Unexpected post-series iOS native source'
+assert hashlib.sha256(p.read_bytes()).hexdigest()=='9e5955ade24205139d1ac26070c65fa2ae7a76feb0bdaf4bc1c8fb34e9962975', 'Unexpected post-series iOS native source'
 patch='--- a/src/ios/native.cpp\n+++ b/src/ios/native.cpp\n@@ -407,7 +407,7 @@\n     system.SetContentProvider(std::make_unique<FileSys::ContentProviderUnion>());\n     system.RegisterContentProvider(FileSys::ContentProviderUnionSlot::FrontendManual,\n                                    manual_provider.get());\n-    system.GetFileSystemController().CreateFactories(*vfs);\n+    system.GetFileSystemController().InitializeContentSystem(*vfs);\n }\n \n Core::SystemResultStatus EmulationSession::InitializeEmulation(const std::string& filepath,\n'
 assert hashlib.sha256(patch.encode('utf-8')).hexdigest()=='2bb101b99ea16a2e8c00d80c9fd0962e12335acfbe7ea438e9b8c5e270146726', 'Embedded iOS content-system patch changed'
 subprocess.run(['git','-c','core.autocrlf=false','-C',str(root),'apply','--check','-'],input=patch.encode('utf-8'),check=True)
 subprocess.run(['git','-c','core.autocrlf=false','-C',str(root),'apply','-'],input=patch.encode('utf-8'),check=True)
-assert hashlib.sha256(p.read_bytes()).hexdigest()=='aed585dce33e68d75eefca9e661b9c32a3e50d32259f63e09f77fa3d30267378', 'Patched iOS native source differs'
+assert hashlib.sha256(p.read_bytes()).hexdigest()=='b5cedd3f31ce8df7109c9dceacaf9502204e10c33a47e08ae60f6f95642ad402', 'Patched iOS native source differs'
 print('iOS content initialization now uses the pinned public entrypoint and its default overwrite policy; lifecycle and platform initialization stage preserved.')
 PY_IOS_CONTENT_SYSTEM_API
 

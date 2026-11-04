@@ -1,3 +1,20 @@
+V18 PRIVATE OWN-BACKING ATTRIBUTION SOURCE CANDIDATE - NOT BUILT OR DEVICE TESTED
+This read-only diagnostic samples only the emulator's known owned guest-backing
+range. It records bounded numeric page-disposition counts and explicit coverage,
+error and cancellation status. It reads no guest bytes or user data and exports
+no raw addresses.
+The existing session owner performs sparse scans; it does not delegate Core
+lifetime to a detached observer. Partial/chunked scans are not atomic snapshots.
+Paged-out logical pages do not measure compressed physical bytes. Unattributed
+task memory is not automatically GPU, JIT or a leak. No guest pages are discarded.
+
+This is an investigation tool, not a proven RAM reduction or game-crash fix.
+All six earlier host gates remain. The actual diagnostic header's policy and
+own-process Mac API smoke test must pass before the iOS app is compiled.
+The Mac result does not prove iPhone runtime compatibility or stable gameplay.
+The standard Mac workflow and the nineteen public carrier paths are unchanged.
+Historical implementation notes follow.
+
 V17 PRIVATE iOS ExecuteProgram SOURCE CANDIDATE — NOT BUILT OR DEVICE TESTED
 This candidate fills an independently observed iOS frontend feature gap: Core's
 ExecuteProgram callback was not registered, although the pinned Qt/Android

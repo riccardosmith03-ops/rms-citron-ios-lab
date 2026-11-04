@@ -182,3 +182,11 @@ V17 iOS deferred ExecuteProgram handoff:
   This is an uncompiled feature-gap candidate, not a proven Mario memory fix.
   Published inventory remains the same nineteen source/license/build carrier
   paths: only runtime guards, build script, README and this NOTICE differ.
+
+
+V18 read-only own-backing attribution diagnostic:
+  The new diagnostic helper and its real-header host test are Copyright 2026
+  RMS Citron iOS contributors, GPL-2.0-or-later. Existing Citron source notices
+  are retained. This adds numeric implementation diagnostics, not guest content,
+  raw addresses, keys, device reports, media or account data. It changes neither
+  guest capacity nor live-memory discard policy and proves no RAM/crash fix.

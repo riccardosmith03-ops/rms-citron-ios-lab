@@ -1706,3 +1706,332 @@ new file mode 100644
 +};
 +
 +} // namespace IOS
+--- a/src/ios/native.cpp
++++ b/src/ios/native.cpp
+@@ -3,6 +3,8 @@
+ 
+ #if defined(CITRON_IOS)
+ #include "common/ios_render_probe.h"
++#include "common/ios_backing_probe.h"
++#include "core/device_memory.h"
+ #endif
+ #include "ios/native.h"
+ 
+@@ -241,6 +243,42 @@
+ EmulationSession instance;
+ #if defined(CITRON_IOS)
+ std::filesystem::path probe_documents_directory;
++
++
++// Called synchronously by the session's owner only. The existing Stop joins the
++// emulation worker before any new Load can replace this borrowed backing range.
++// No recorder thread, guest/GPU callback or detached task receives this range.
++void ProbeGuestBacking(const char* checkpoint, unsigned seconds,
++                       const Common::HostMemory& backing,
++                       const std::atomic<bool>* running = nullptr) {
++    namespace B = Common::IOS::BackingProbe;
++    const auto task_before = B::OwnTaskMemory();
++    const auto result = B::Scan(
++        static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(backing.BackingBasePointer())),
++        backing.backing_size, B::HostPageBytes(), B::NativeQuery{},
++        [running] { return running == nullptr || running->load(std::memory_order_relaxed); },
++        B::NowUs);
++    const auto task_after = B::OwnTaskMemory();
++    // At most eleven records per program run: before Run, eight timed opportunities,
++    // and before/after teardown. These are logical page counts, NOT byte charges.
++    // Neither a partial result nor query failure is reported as an empty backing.
++    LOG_INFO(Frontend,
++        "IOS_BACKING_ATTRIBUTION checkpoint={} seconds={} status={} native_error={} "
++        "capacity_bytes={} host_page_bytes={} query_page_bytes={} query_calls={} "
++        "scanned_pages={} covered_bytes={} elapsed_us={} present_pages={} "
++        "paged_out_pages={} both_pages={} neither_pages={} zero_disposition_pages={} dirty_pages={} "
++        "reusable_pages={} external_pages={} unknown_flag_pages={} "
++        "task_before_error={} task_before_resident_bytes={} task_before_footprint_bytes={} "
++        "task_after_error={} task_after_resident_bytes={} task_after_footprint_bytes={}",
++        checkpoint, seconds, static_cast<unsigned>(result.status), result.native_error,
++        result.capacity_bytes, result.host_page_bytes, result.query_page_bytes, result.query_calls,
++        result.scanned_pages, result.covered_bytes, result.elapsed_us, result.present_pages,
++        result.paged_out_pages, result.both_pages, result.neither_pages,
++        result.zero_disposition_pages, result.dirty_pages,
++        result.reusable_pages, result.external_pages, result.unknown_flag_pages,
++        task_before.error, task_before.resident_bytes, task_before.footprint_bytes,
++        task_after.error, task_after.resident_bytes, task_after.footprint_bytes);
++}
+ #endif
+ 
+ std::string SafeString(const char* value) {
+@@ -651,6 +689,11 @@
+ 
+ void EmulationSession::RunCurrentEmulation() {
+ #if defined(CITRON_IOS)
++    // The successful Load has created DeviceMemory; this existing worker owns
++    // the full run and teardown. Metadata queries never dereference guest bytes.
++    const auto& guest_backing = system.DeviceMemory().buffer;
++#endif
++#if defined(CITRON_IOS)
+     Common::IOS::RenderProbe::Scope probe_run{Common::IOS::RenderProbe::Stage::RunEmulation};
+ #endif
+ 
+@@ -661,6 +704,12 @@
+         LoadDiskCacheProgress(VideoCore::LoadCallbackStage::Complete, 0, 0);
+     }
+ 
++#if defined(CITRON_IOS)
++    if (is_running) {
++        ProbeGuestBacking("before_run", 0, guest_backing, &is_running);
++    }
++#endif
++
+     if (is_running) {
+ #if defined(CITRON_IOS)
+         Common::IOS::RenderProbe::Scope probe_system_run{Common::IOS::RenderProbe::Stage::SystemRun};
+@@ -672,11 +721,24 @@
+         system.InitializeDebugger();
+     }
+ 
++#if defined(CITRON_IOS)
++    const auto backing_probe_started = Common::IOS::BackingProbe::NowUs();
++    Common::IOS::BackingProbe::Schedule backing_probe_schedule;
++#endif
+     while (true) {
+         std::unique_lock lock{mutex};
+         if (cv.wait_for(lock, std::chrono::milliseconds(800), [this] { return !is_running; })) {
+             break;
+         }
++        lock.unlock(); // Stop can publish cancellation while a query is in progress.
++#if defined(CITRON_IOS)
++        const auto now = Common::IOS::BackingProbe::NowUs();
++        if (is_running && now >= backing_probe_started) {
++            if (const auto seconds = backing_probe_schedule.TakeDue(now - backing_probe_started)) {
++                ProbeGuestBacking("during_run", seconds, guest_backing, &is_running);
++            }
++        }
++#endif
+     }
+ 
+ #if defined(CITRON_IOS)
+@@ -694,9 +756,18 @@
+     system.HIDCore().SetSupportedStyleTag({Core::HID::NpadStyleSet::All});
+ 
+     if (load_result == Core::SystemResultStatus::Success) {
++#if defined(CITRON_IOS)
++        const auto& guest_backing = system.DeviceMemory().buffer;
++        ProbeGuestBacking("before_shutdown", 0, guest_backing);
++#endif
+         system.DetachDebugger();
+         system.ShutdownMainProcess();
+         detached_tasks.WaitForAllTasks();
++#if defined(CITRON_IOS)
++        // Current Core retains DeviceMemory across ShutdownMainProcess. Query
++        // its still-owned allocation only; do not reset, clear or reclaim pages.
++        ProbeGuestBacking("after_shutdown", 0, guest_backing);
++#endif
+         load_result = Core::SystemResultStatus::ErrorNotInitialized;
+     }
+ 
+--- /dev/null
++++ b/src/common/ios_backing_probe.h
+@@ -0,0 +1,203 @@
++// SPDX-FileCopyrightText: Copyright 2026 Citron Emulator Project
++// SPDX-License-Identifier: GPL-2.0-or-later
++
++#pragma once
++
++#include <algorithm>
++#include <array>
++#include <chrono>
++#include <cstdint>
++#include <limits>
++#include <span>
++
++#if defined(__APPLE__)
++#include <mach/mach.h>
++#include <mach/mach_vm.h>
++#include <mach/vm_statistics.h>
++#include <unistd.h>
++#endif
++
++namespace Common::IOS::BackingProbe {
++
++// Own guest-backing metadata only: no reads, writes, residency requests, advice,
++// VM map walks or task_for_pid. Counts are logical page dispositions sampled over
++// time, NOT an atomic snapshot or physical/compressed-byte accounting.
++inline constexpr std::uint64_t MaxBackingBytes = std::uint64_t{4} << 30;
++inline constexpr std::size_t ChunkPages = 4096;
++inline constexpr std::uint64_t CalibrationBytes = 64 * 1024;
++inline constexpr std::uint64_t BudgetUs = 100000;
++inline constexpr std::uint32_t Present = 0x1, Dirty = 0x8, PagedOut = 0x10;
++inline constexpr std::uint32_t External = 0x80, Reusable = 0x800;
++inline constexpr std::uint32_t KnownDispositionMask = 0xfff;
++
++enum class Status : unsigned {
++    Complete, InvalidRange, InvalidHostPageSize, CalibrationFailed,
++    InvalidQueryGranularity, QueryFailed, UnexpectedCount, Cancelled, BudgetExceeded,
++};
++
++struct QueryReply {
++    int error{};
++    std::uint64_t count{}; // Number of integer dispositions, never bytes.
++};
++
++struct Result {
++    Status status{Status::InvalidRange};
++    int native_error{};
++    std::uint64_t capacity_bytes{}, host_page_bytes{}, query_page_bytes{};
++    std::uint64_t query_calls{}, scanned_pages{}, covered_bytes{}, elapsed_us{};
++    std::uint64_t present_pages{}, paged_out_pages{}, both_pages{}, neither_pages{};
++    std::uint64_t zero_disposition_pages{};
++    std::uint64_t dirty_pages{}, reusable_pages{}, external_pages{}, unknown_flag_pages{};
++};
++
++// The caller owns the allocation for this entire synchronous call. Cancellation
++// and elapsed-time bounds are checked between kernel calls, not a promise that a
++// single kernel call cannot block. One fixed 16 KiB stack buffer; at most 257
++// calls for a 4 GiB range at 4 KiB granularity, including calibration.
++template <typename Query, typename Continue, typename Clock>
++Result Scan(std::uint64_t base, std::uint64_t bytes, std::uint64_t host_page,
++            Query&& query, Continue&& keep_running, Clock&& now_us) noexcept {
++    Result result;
++    result.capacity_bytes = bytes;
++    result.host_page_bytes = host_page;
++    const auto started = now_us();
++    const auto finish = [&](Status status) {
++        result.status = status;
++        const auto end = now_us();
++        result.elapsed_us = end >= started ? end - started : 0;
++        return result;
++    };
++    const auto interrupted = [&]() {
++        if (!keep_running()) { result.status = Status::Cancelled; return true; }
++        const auto now = now_us();
++        if (now < started || now - started >= BudgetUs) {
++            result.status = Status::BudgetExceeded;
++            return true;
++        }
++        return false;
++    };
++    if (host_page != 4096 && host_page != 16384)
++        return finish(Status::InvalidHostPageSize);
++    if (base == 0 || base % host_page != 0 || bytes < CalibrationBytes ||
++        bytes > MaxBackingBytes || bytes % host_page != 0 ||
++        bytes > std::numeric_limits<std::uint64_t>::max() - base)
++        return finish(Status::InvalidRange);
++
++    // The calibration request itself must remain owned even if the effective
++    // granularity is larger than host_page. Align its start to both supported
++    // granularities before the first native call; never round outside the owner.
++    const auto calibration_offset = (16384 - base % 16384) % 16384;
++    if (calibration_offset > bytes || CalibrationBytes > bytes - calibration_offset)
++        return finish(Status::InvalidRange);
++    std::array<int, ChunkPages> dispositions{};
++    if (interrupted()) return finish(result.status);
++    ++result.query_calls;
++    // Full buffer capacity matters: using input count=1 can silently truncate a
++    // 4 KiB-effective query on a 16 KiB host and manufacture false coverage.
++    const auto calibration = query(base + calibration_offset, CalibrationBytes,
++                                   std::span{dispositions});
++    if (calibration.error != 0) {
++        result.native_error = calibration.error;
++        return finish(Status::CalibrationFailed);
++    }
++    if (calibration.count == 0 || calibration.count > dispositions.size() ||
++        CalibrationBytes % calibration.count != 0)
++        return finish(Status::InvalidQueryGranularity);
++    result.query_page_bytes = CalibrationBytes / calibration.count;
++    if ((result.query_page_bytes != 4096 && result.query_page_bytes != 16384) ||
++        base % result.query_page_bytes != 0 || bytes % result.query_page_bytes != 0)
++        return finish(Status::InvalidQueryGranularity);
++    if (interrupted()) return finish(result.status);
++
++    while (result.covered_bytes < bytes) {
++        if (interrupted()) return finish(result.status);
++        const auto chunk_bytes = std::min(bytes - result.covered_bytes,
++                                         ChunkPages * result.query_page_bytes);
++        const auto requested = chunk_bytes / result.query_page_bytes;
++        ++result.query_calls;
++        const auto reply = query(base + result.covered_bytes, chunk_bytes,
++                                 std::span{dispositions}.first(requested));
++        if (reply.error != 0) {
++            result.native_error = reply.error;
++            return finish(Status::QueryFailed);
++        }
++        if (reply.count != requested) return finish(Status::UnexpectedCount);
++        for (std::size_t i = 0; i < requested; ++i) {
++            const auto flags = static_cast<std::uint32_t>(dispositions[i]);
++            const bool present = (flags & Present) != 0;
++            const bool paged_out = (flags & PagedOut) != 0;
++            result.present_pages += present;
++            result.paged_out_pages += paged_out;
++            result.both_pages += present && paged_out;
++            result.neither_pages += !present && !paged_out;
++            result.zero_disposition_pages += flags == 0;
++            result.dirty_pages += (flags & Dirty) != 0;
++            result.reusable_pages += (flags & Reusable) != 0;
++            result.external_pages += (flags & External) != 0;
++            result.unknown_flag_pages += (flags & ~KnownDispositionMask) != 0;
++        }
++        result.scanned_pages += requested;
++        result.covered_bytes += chunk_bytes;
++        if (interrupted()) return finish(result.status);
++    }
++    return finish(Status::Complete);
++}
++
++class Schedule final {
++public:
++    // Eight opportunities per program run. A delayed owner skips old deadlines
++    // instead of running several expensive scans back-to-back to catch up.
++    unsigned TakeDue(std::uint64_t elapsed_us) noexcept {
++        unsigned due = 0;
++        while (next < seconds.size() && elapsed_us >= seconds[next] * 1000000ULL)
++            due = seconds[next++];
++        return due;
++    }
++private:
++    static constexpr std::array<unsigned, 8> seconds{5, 10, 20, 30, 45, 60, 90, 120};
++    std::size_t next{};
++};
++
++inline std::uint64_t NowUs() noexcept {
++    return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
++        std::chrono::steady_clock::now().time_since_epoch()).count());
++}
++
++#if defined(__APPLE__)
++static_assert(Present == VM_PAGE_QUERY_PAGE_PRESENT && Dirty == VM_PAGE_QUERY_PAGE_DIRTY &&
++              PagedOut == VM_PAGE_QUERY_PAGE_PAGED_OUT && External == VM_PAGE_QUERY_PAGE_EXTERNAL &&
++              Reusable == VM_PAGE_QUERY_PAGE_REUSABLE);
++
++struct NativeQuery final {
++    QueryReply operator()(std::uint64_t address, std::uint64_t bytes,
++                          std::span<int> output) const noexcept {
++        mach_vm_size_t count = output.size();
++        const auto error = mach_vm_page_range_query(mach_task_self(), address, bytes,
++            static_cast<mach_vm_address_t>(reinterpret_cast<std::uintptr_t>(output.data())),
++            &count);
++        return {static_cast<int>(error), count};
++    }
++};
++
++inline std::uint64_t HostPageBytes() noexcept {
++    const auto value = sysconf(_SC_PAGESIZE);
++    return value > 0 ? static_cast<std::uint64_t>(value) : 0;
++}
++
++struct TaskMemory {
++    int error{};
++    std::uint64_t resident_bytes{}, footprint_bytes{};
++};
++
++inline TaskMemory OwnTaskMemory() noexcept {
++    task_vm_info_data_t info{};
++    mach_msg_type_number_t count = TASK_VM_INFO_COUNT;
++    const auto error = task_info(mach_task_self(), TASK_VM_INFO,
++                                reinterpret_cast<task_info_t>(&info), &count);
++    if (error != KERN_SUCCESS) return {static_cast<int>(error), 0, 0};
++    if (count < TASK_VM_INFO_REV1_COUNT) return {-1, 0, 0};
++    return {0, info.resident_size, info.phys_footprint};
++}
++#endif
++
++} // namespace Common::IOS::BackingProbe
