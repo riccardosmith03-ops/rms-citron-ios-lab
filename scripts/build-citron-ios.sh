@@ -65,6 +65,16 @@ assert not p.is_symlink() and p.resolve(strict=True).is_relative_to(r)
 assert hashlib.sha256(p.read_bytes()).hexdigest()=='4d79373e7660779ae85a352b580a6650303b7f32e4a636bb7e30b4b2a1a82956','Unexpected iOS VMA block preference source'
 PY_IOS_VMA_BLOCK64_BEFORE
 
+# V17 input: the unchanged pinned iOS header and absent deferred-policy helper.
+python3 - "$source_dir" <<'PY_IOS_PROGRAM_SWITCH_BEFORE'
+import hashlib,pathlib,sys
+r=pathlib.Path(sys.argv[1]).resolve(strict=True)
+p=r/'src/ios/native.h'
+assert not p.is_symlink() and p.resolve(strict=True).is_relative_to(r)
+assert hashlib.sha256(p.read_bytes()).hexdigest()=='f42a3505492ab14a1af0cc803460aae5446c8485a69e51fd78fefe3efc90a23c','Unexpected iOS session header'
+assert not (r/'src/ios/deferred_program_switch.h').exists(),'Deferred program-switch helper already exists'
+PY_IOS_PROGRAM_SWITCH_BEFORE
+
 while IFS= read -r patch_name; do
     [[ -n "$patch_name" && "$patch_name" != \#* ]] || continue
     [[ "$patch_name" != */* && "$patch_name" == *.patch ]] || exit 5
@@ -73,6 +83,125 @@ while IFS= read -r patch_name; do
     git -C "$source_dir" apply --check "$patch_file"
     git -C "$source_dir" apply "$patch_file"
 done < "$project_dir/patches/series.txt"
+
+# V17: bind the actual deferred lifecycle and run its real atomic policy test.
+python3 - "$source_dir" <<'PY_IOS_PROGRAM_SWITCH_AFTER'
+import hashlib,pathlib,sys
+r=pathlib.Path(sys.argv[1]).resolve(strict=True)
+for name,digest in {'src/ios/native.cpp':'efe47d7217e1b834dac0c2ca3dba41f4dd02d32f13a6c60d5013707ff0abe7b3','src/ios/native.h':'937da682e97bd810db2d622f531a5bfb4c04d9ac1f273ca41a61339966585ff5','src/ios/deferred_program_switch.h':'653c628d96a6364378797ed87efca582a072ec19af4f3999e8946576c1424fac'}.items():
+ p=r/name
+ assert not p.is_symlink() and p.resolve(strict=True).is_relative_to(r)
+ assert hashlib.sha256(p.read_bytes()).hexdigest()==digest,'Unexpected V17 program-switch source: '+name
+PY_IOS_PROGRAM_SWITCH_AFTER
+mkdir -p "$deps/build"
+cat > "$deps/build/ios-deferred-program-switch-test.cpp" <<'CPP_IOS_PROGRAM_SWITCH_POLICY_TEST'
+// SPDX-FileCopyrightText: Copyright 2026 RMS Citron iOS contributors
+// SPDX-License-Identifier: GPL-2.0-or-later
+// Real production atomic policy; no Core, decoder or lifecycle stubs.
+#include <atomic>
+#include <cstddef>
+#include <cstdint>
+#include <functional>
+#include <iostream>
+#include <limits>
+#include <stdexcept>
+#include <thread>
+#include "ios/deferred_program_switch.h"
+
+namespace {
+void Need(bool ok, const char* message) {
+    if (!ok) throw std::runtime_error(message);
+}
+void Sequential() {
+    IOS::DeferredProgramSwitch q;
+    Need(q.IsCancelled(), "new session must be cancelled");
+    Need(!q.Request(0) && !q.TakePending(), "inactive session accepted a request");
+    q.BeginSession();
+    Need(!q.IsCancelled() && !q.TakePending(), "new active session must be idle");
+    Need(q.Request(0), "restart index zero was rejected");
+    Need(!q.Request(1), "duplicate request replaced the first index");
+    Need(q.TakePending() == 0, "restart index zero was lost");
+    Need(!q.TakePending(), "request was consumed twice");
+    Need(q.Request(static_cast<std::size_t>(q.MaxProgramIndex)), "max signed index rejected");
+    Need(q.TakePending() == q.MaxProgramIndex, "max signed index narrowed");
+    Need(!q.Request(static_cast<std::size_t>(q.MaxProgramIndex + 1)), "invalid signed index accepted");
+    Need(!q.TakePending(), "invalid index mutated state");
+    Need(q.Request(2), "next valid request rejected");
+    q.Cancel();
+    Need(q.IsCancelled() && !q.TakePending() && !q.Request(3), "Stop did not revoke the pending request");
+    // BeginSession is deliberately NOT tested concurrently: its precondition is
+    // that the preceding worker/guest epoch has already been joined.
+    q.BeginSession();
+    Need(q.Request(4) && q.TakePending() == 4, "explicit next session did not reset cancellation");
+}
+void CompetingRequests() {
+    for (unsigned n = 0; n < 512; ++n) {
+        IOS::DeferredProgramSwitch q;
+        q.BeginSession();
+        std::atomic<unsigned> ready{};
+        std::atomic<bool> go{};
+        bool a = false, b = false;
+        auto request = [&](std::size_t value, bool& accepted) {
+            ready.fetch_add(1, std::memory_order_release);
+            while (!go.load(std::memory_order_acquire)) std::this_thread::yield();
+            accepted = q.Request(value);
+        };
+        std::thread first{request, 3, std::ref(a)};
+        std::thread second{request, 7, std::ref(b)};
+        while (ready.load(std::memory_order_acquire) != 2) std::this_thread::yield();
+        go.store(true, std::memory_order_release);
+        first.join(); second.join();
+        Need(a != b, "competing requests did not have exactly one winner");
+        Need(q.TakePending() == (a ? 3u : 7u), "wrong winning program index");
+        Need(!q.TakePending(), "competing request duplicated a handoff");
+    }
+}
+void StopAgainstRequest() {
+    for (unsigned n = 0; n < 512; ++n) {
+        IOS::DeferredProgramSwitch q;
+        q.BeginSession();
+        std::atomic<bool> go{};
+        std::thread guest{[&] {
+            while (!go.load(std::memory_order_acquire)) std::this_thread::yield();
+            (void)q.Request(1);
+        }};
+        go.store(true, std::memory_order_release);
+        q.Cancel();
+        guest.join();
+        Need(q.IsCancelled() && !q.TakePending() && !q.Request(2), "Stop lost a race against a callback");
+    }
+}
+void StopAfterTakeBeforeReady() {
+    IOS::DeferredProgramSwitch q;
+    q.BeginSession();
+    Need(q.Request(1) && q.TakePending() == 1, "fixture handoff missing");
+    // Model the actual loader interval: no BeginSession is permitted here.
+    // Stop must stay observable to the ready-to-run check after initialization.
+    std::thread frontend_stop{[&] { q.Cancel(); }};
+    frontend_stop.join();
+    Need(q.IsCancelled() && !q.Request(2), "a consumed handoff undid Stop during initialization");
+}
+}
+int main() {
+    try {
+        Sequential(); CompetingRequests(); StopAgainstRequest(); StopAfterTakeBeforeReady();
+        std::cout << "PASS_IOS_DEFERRED_PROGRAM_SWITCH_ATOMIC_POLICY_1024_RACES\n";
+    } catch (const std::exception& error) {
+        std::cerr << "FAIL_IOS_DEFERRED_PROGRAM_SWITCH: " << error.what() << '\n';
+        return 1;
+    }
+}
+CPP_IOS_PROGRAM_SWITCH_POLICY_TEST
+python3 - "$deps/build/ios-deferred-program-switch-test.cpp" <<'PY_IOS_PROGRAM_SWITCH_TEST_PIN'
+import hashlib,pathlib,sys
+assert hashlib.sha256(pathlib.Path(sys.argv[1]).read_bytes()).hexdigest()=='fd332eb2350c5f2a81054cbe25aa19d8da8fa23bab02120e8eae46c95c336054','Frozen deferred-program-switch atomic test differs'
+PY_IOS_PROGRAM_SWITCH_TEST_PIN
+env -u SDKROOT -u IPHONEOS_DEPLOYMENT_TARGET -u CFLAGS -u CXXFLAGS -u CPPFLAGS -u LDFLAGS \
+    xcrun --sdk macosx clang++ -std=c++23 -UNDEBUG -pthread \
+    -isysroot "$(xcrun --sdk macosx --show-sdk-path)" \
+    -I "$source_dir/src" "$deps/build/ios-deferred-program-switch-test.cpp" \
+    -o "$deps/build/ios-deferred-program-switch-test"
+"$deps/build/ios-deferred-program-switch-test"
 
 # Bind the iOS-only VMA preferred-block-size source to the pinned revision.
 python3 - "$source_dir" <<'PY_IOS_VMA_BLOCK64_AFTER'
@@ -237,7 +366,7 @@ PY_IOS_MEMORY_DIAGNOSTICS_AFTER
 python3 - "$source_dir" <<'PY_IOS_RENDER_PROBE_AFTER'
 import hashlib,pathlib,sys
 r=pathlib.Path(sys.argv[1]).resolve(strict=True)
-for name,digest in {'src/ios/native.cpp': '4d7cf88f177aec469c72ed651ed903025494d5aee6a2ed064a29c6e1dd11177e', 'src/ios/emu_window/emu_window.cpp': 'f12d486c2bc2c6744ef4b58fcd68f6b9fa3c13b618cf2d4cce11d3d09291410a', 'src/core/hle/service/nvdrv/devices/nvhost_gpu.cpp': 'b4100833090b1c8069eb56b026de4935e3b9cbd8258f97bc8cf96eb342278308', 'src/video_core/gpu_thread.cpp': '68a0dae863b143765d968598c760193b4f0d034e46590c970faa16b40ca18d14', 'src/core/hle/service/nvnflinger/buffer_queue_producer.cpp': 'a308d2b1f86d40ef0739a0a9043a4b48fe24b20f5c77deb61f47c1253b029b94', 'src/core/hle/service/nvnflinger/hardware_composer.cpp': '16452f72b00f005d5c98abfa24fc2e2bcf8ef9eaa06abfbd5734c57c417efa6d', 'src/video_core/gpu.cpp': 'bf00efab550e4528d07b639a2a886e1f99ee34cfa5910c17a8951c8c2fa885ee', 'src/video_core/renderer_vulkan/renderer_vulkan.cpp': '5fac00a19a35dd09554e7a255257eabeecaef2415a65b9f41c67ab69055a9578', 'src/video_core/renderer_vulkan/vk_present_manager.cpp': '2b9eb2464bc3eb4a4683c0d0b5a9a6522b78efdfaae7da95a22dd24860d83108', 'src/core/device_memory_manager.inc': '9202e645c29abfbf8c0ae81cec8b5445d79b8d84f45ff77219173a3e14772509', 'src/ios/jit_icache_callbacks_ios.cpp': '5a06b39329d23a189fc40fbb454b2b86dd1b6ec117d3a55e5fb2b5ae1c64f939', 'src/common/ios_render_probe.h': '10d747d48e4c21275a7d74909b5032e263008231a889e98002517e903151b52d'}.items():
+for name,digest in {'src/ios/native.cpp': 'efe47d7217e1b834dac0c2ca3dba41f4dd02d32f13a6c60d5013707ff0abe7b3', 'src/ios/emu_window/emu_window.cpp': 'f12d486c2bc2c6744ef4b58fcd68f6b9fa3c13b618cf2d4cce11d3d09291410a', 'src/core/hle/service/nvdrv/devices/nvhost_gpu.cpp': 'b4100833090b1c8069eb56b026de4935e3b9cbd8258f97bc8cf96eb342278308', 'src/video_core/gpu_thread.cpp': '68a0dae863b143765d968598c760193b4f0d034e46590c970faa16b40ca18d14', 'src/core/hle/service/nvnflinger/buffer_queue_producer.cpp': 'a308d2b1f86d40ef0739a0a9043a4b48fe24b20f5c77deb61f47c1253b029b94', 'src/core/hle/service/nvnflinger/hardware_composer.cpp': '16452f72b00f005d5c98abfa24fc2e2bcf8ef9eaa06abfbd5734c57c417efa6d', 'src/video_core/gpu.cpp': 'bf00efab550e4528d07b639a2a886e1f99ee34cfa5910c17a8951c8c2fa885ee', 'src/video_core/renderer_vulkan/renderer_vulkan.cpp': '5fac00a19a35dd09554e7a255257eabeecaef2415a65b9f41c67ab69055a9578', 'src/video_core/renderer_vulkan/vk_present_manager.cpp': '2b9eb2464bc3eb4a4683c0d0b5a9a6522b78efdfaae7da95a22dd24860d83108', 'src/core/device_memory_manager.inc': '9202e645c29abfbf8c0ae81cec8b5445d79b8d84f45ff77219173a3e14772509', 'src/ios/jit_icache_callbacks_ios.cpp': '5a06b39329d23a189fc40fbb454b2b86dd1b6ec117d3a55e5fb2b5ae1c64f939', 'src/common/ios_render_probe.h': '10d747d48e4c21275a7d74909b5032e263008231a889e98002517e903151b52d'}.items():
  p=r/name
  assert not p.is_symlink() and p.resolve(strict=True).is_relative_to(r)
  assert hashlib.sha256(p.read_bytes()).hexdigest()==digest,'Unexpected render-probe source: '+name
@@ -264,12 +393,12 @@ for name,digest in expected_api.items():
  assert hashlib.sha256(p.read_bytes()).hexdigest()==digest, 'Unexpected pinned filesystem API: '+name
 p=root/'src/ios/native.cpp'
 assert not p.is_symlink() and p.resolve(strict=True).is_relative_to(root)
-assert hashlib.sha256(p.read_bytes()).hexdigest()=='4d7cf88f177aec469c72ed651ed903025494d5aee6a2ed064a29c6e1dd11177e', 'Unexpected post-series iOS native source'
+assert hashlib.sha256(p.read_bytes()).hexdigest()=='efe47d7217e1b834dac0c2ca3dba41f4dd02d32f13a6c60d5013707ff0abe7b3', 'Unexpected post-series iOS native source'
 patch='--- a/src/ios/native.cpp\n+++ b/src/ios/native.cpp\n@@ -407,7 +407,7 @@\n     system.SetContentProvider(std::make_unique<FileSys::ContentProviderUnion>());\n     system.RegisterContentProvider(FileSys::ContentProviderUnionSlot::FrontendManual,\n                                    manual_provider.get());\n-    system.GetFileSystemController().CreateFactories(*vfs);\n+    system.GetFileSystemController().InitializeContentSystem(*vfs);\n }\n \n Core::SystemResultStatus EmulationSession::InitializeEmulation(const std::string& filepath,\n'
 assert hashlib.sha256(patch.encode('utf-8')).hexdigest()=='2bb101b99ea16a2e8c00d80c9fd0962e12335acfbe7ea438e9b8c5e270146726', 'Embedded iOS content-system patch changed'
 subprocess.run(['git','-c','core.autocrlf=false','-C',str(root),'apply','--check','-'],input=patch.encode('utf-8'),check=True)
 subprocess.run(['git','-c','core.autocrlf=false','-C',str(root),'apply','-'],input=patch.encode('utf-8'),check=True)
-assert hashlib.sha256(p.read_bytes()).hexdigest()=='fed6ea7cbc37380458ab6a908b9bfb9192d2d0dac7ac0ae03422c206353c444e', 'Patched iOS native source differs'
+assert hashlib.sha256(p.read_bytes()).hexdigest()=='aed585dce33e68d75eefca9e661b9c32a3e50d32259f63e09f77fa3d30267378', 'Patched iOS native source differs'
 print('iOS content initialization now uses the pinned public entrypoint and its default overwrite policy; lifecycle and platform initialization stage preserved.')
 PY_IOS_CONTENT_SYSTEM_API
 

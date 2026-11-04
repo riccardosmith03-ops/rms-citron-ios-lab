@@ -171,3 +171,14 @@ V16 iOS VMA preferred-block-size experiment:
   Smaller block and dedicated-allocation heuristics can affect allocation count,
   overhead or fragmentation. No measured RAM-saving, Mario stability or gameplay
   result is established by this source experiment.
+
+
+V17 iOS deferred ExecuteProgram handoff:
+  New src/ios/deferred_program_switch.h and its host policy test are Copyright
+  2026 RMS Citron iOS contributors, GPL-2.0-or-later. Existing native.cpp/native.h
+  Citron notices are retained. The implementation follows the lifecycle contract
+  exposed by pinned Core and the same pinned Qt/Android frontends; no game code,
+  media, keys, device data, account secrets or unrelated project data are included.
+  This is an uncompiled feature-gap candidate, not a proven Mario memory fix.
+  Published inventory remains the same nineteen source/license/build carrier
+  paths: only runtime guards, build script, README and this NOTICE differ.

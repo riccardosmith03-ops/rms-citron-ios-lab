@@ -1358,3 +1358,351 @@
          .pAllocationCallbacks = nullptr,
          .pDeviceMemoryCallbacks = nullptr,
          .pHeapSizeLimit = nullptr,
+diff --git a/src/ios/native.cpp b/src/ios/native.cpp
+--- a/src/ios/native.cpp
++++ b/src/ios/native.cpp
+@@ -410,9 +410,10 @@
+ void EmulationSession::InitializeSystem(bool reload) {
+     if (!reload) {
+         system.SetFilesystem(vfs);
+-    }
+-
+-    system.GetUserChannel().clear();
++        // Fresh frontend launches discard an old UserChannel. ExecuteProgram
++        // has just populated this channel, so an application relaunch preserves it.
++        system.GetUserChannel().clear();
++    }
+     manual_provider = std::make_unique<FileSys::ManualContentProvider>();
+     system.SetContentProvider(std::make_unique<FileSys::ContentProviderUnion>());
+     system.RegisterContentProvider(FileSys::ContentProviderUnionSlot::FrontendManual,
+@@ -421,7 +422,8 @@
+ }
+ 
+ Core::SystemResultStatus EmulationSession::InitializeEmulation(const std::string& filepath,
+-                                                               std::size_t program_index) {
++                                                               std::size_t program_index,
++                                                               bool frontend_initiated) {
+     std::scoped_lock lock{mutex};
+     if (!native_layer) {
+         return Core::SystemResultStatus::ErrorVideoCore;
+@@ -450,7 +452,8 @@
+ 
+     Service::AM::FrontendAppletParameters params{
+         .applet_id = Service::AM::AppletId::Application,
+-        .launch_type = Service::AM::LaunchType::FrontendInitiated,
++        .launch_type = frontend_initiated ? Service::AM::LaunchType::FrontendInitiated
++                                          : Service::AM::LaunchType::ApplicationInitiated,
+         .program_index = static_cast<s32>(program_index),
+     };
+     {
+@@ -471,13 +474,16 @@
+ Core::SystemResultStatus EmulationSession::Launch(const std::string& filepath,
+                                                   std::size_t program_index) {
+     Stop();
++    // Lifecycle entry points are serialized by the frontend. Begin only after
++    // Stop joined the previous worker; never reactivate a cancelled handoff.
++    program_switch.BeginSession();
+ #if defined(CITRON_IOS)
+     (void)Common::IOS::RenderProbe::recorder.Begin(probe_documents_directory);
+     Common::IOS::RenderProbe::Scope probe_launch{Common::IOS::RenderProbe::Stage::LaunchSetup};
+ #endif
+     InitializeSystem(false);
+ 
+-    const auto result = InitializeEmulation(filepath, program_index);
++    const auto result = InitializeEmulation(filepath, program_index, true);
+     if (result != Core::SystemResultStatus::Success) {
+ #if defined(CITRON_IOS)
+         probe_launch.Close();
+@@ -486,29 +492,49 @@
+         return result;
+     }
+ 
++    bool cancelled = false;
+     {
+         std::scoped_lock lock{mutex};
+-        is_running = true;
++        cancelled = program_switch.IsCancelled();
++        is_running = !cancelled;
+         is_paused = false;
++    }
++    if (cancelled) {
++#if defined(CITRON_IOS)
++        probe_launch.Close();
++#endif
++        ShutdownEmulation(Core::SystemResultStatus::Success);
++        return Core::SystemResultStatus::ErrorNotInitialized;
+     }
+     // A worker may have requested exit during initialization. Register only after
+     // is_running is set so a pending exit cannot be overwritten by startup.
++    RegisterCoreCallbacks();
++#if defined(CITRON_IOS)
++    probe_launch.Close();
++#endif
++    // Bind a fresh render-probe generation for EACH run, including handoffs.
++    emulation_thread = std::thread{[this, filepath] { RunEmulation(filepath); }};
++    return result;
++}
++
++void EmulationSession::RegisterCoreCallbacks() {
++    // Core::System::Load clears ExitCallback on every program load. Call this
++    // only after is_running is set, so a queued startup exit stays authoritative.
+     system.RegisterExitCallback([this] {
+         is_running = false;
+         cv.notify_one();
+     });
+-#if defined(CITRON_IOS)
+-    const auto probe_generation = Common::IOS::RenderProbe::CaptureGeneration();
+-    probe_launch.Close();
+-    emulation_thread = std::thread{[this, probe_generation] {
+-        Common::IOS::RenderProbe::CallbackGeneration probe_context{probe_generation};
+-        RunEmulation();
+-    }};
+-#endif
+-#if !defined(CITRON_IOS)
+-    emulation_thread = std::thread{[this] { RunEmulation(); }};
+-#endif
+-    return result;
++    system.RegisterExecuteProgramCallback([this](std::size_t next_program_index) {
++        // Never call Launch/Stop here: a guest worker must not join itself or
++        // tear down Core while executing one of Core's service callbacks.
++        if (program_switch.Request(next_program_index)) {
++            LOG_INFO(Frontend, "iOS deferred ExecuteProgram accepted index={}", next_program_index);
++            is_running = false;
++            cv.notify_one();
++        } else {
++            LOG_WARNING(Frontend, "iOS ExecuteProgram request rejected index={}", next_program_index);
++        }
++    });
+ }
+ 
+ void EmulationSession::Pause() {
+@@ -532,6 +558,9 @@
+ void EmulationSession::Stop() {
+     {
+         std::scoped_lock lock{mutex};
++        // Explicit frontend Stop wins even when a program index was already
++        // requested, or while a deferred program is still being initialized.
++        program_switch.Cancel();
+         if (!is_running && !emulation_thread.joinable()) {
+             return;
+         }
+@@ -554,7 +583,73 @@
+     }
+ }
+ 
+-void EmulationSession::RunEmulation() {
++void EmulationSession::RunEmulation(const std::string& filepath) {
++    for (;;) {
++        {
++#if defined(CITRON_IOS)
++            Common::IOS::RenderProbe::CallbackGeneration probe_context{
++                Common::IOS::RenderProbe::CaptureGeneration()};
++#endif
++            RunCurrentEmulation();
++        }
++
++        // Complete teardown before consuming the index. This also prevents an
++        // old guest callback from publishing a second index into an idle queue.
++        // Suppress only the intermediate stopped event: Swift must keep its
++        // session/resource access alive until the final stop or an error.
++        ShutdownEmulation(system.GetExitResult(), false);
++        // All guest work has drained; retain an error that raced with the
++        // handoff callback during teardown rather than using a stale snapshot.
++        const auto exit_result = system.GetExitResult();
++        if (exit_result != Core::SystemResultStatus::Success) {
++            // A real Core failure wins over a concurrently accepted handoff.
++            program_switch.Cancel();
++            NotifyEmulationStopped(exit_result);
++            return;
++        }
++        const auto next_program_index = program_switch.TakePending();
++        if (!next_program_index || program_switch.IsCancelled()) {
++            NotifyEmulationStopped(exit_result);
++            return;
++        }
++
++#if defined(CITRON_IOS)
++        (void)Common::IOS::RenderProbe::recorder.Begin(probe_documents_directory);
++        Common::IOS::RenderProbe::CallbackGeneration probe_context{
++            Common::IOS::RenderProbe::CaptureGeneration()};
++        Common::IOS::RenderProbe::Scope probe_launch{Common::IOS::RenderProbe::Stage::LaunchSetup};
++#endif
++        // Like the pinned Qt/Android frontends: retain the UserChannel and use
++        // ApplicationInitiated with the requested index in the SAME container.
++        InitializeSystem(true);
++        const auto result = InitializeEmulation(filepath, *next_program_index, false);
++#if defined(CITRON_IOS)
++        probe_launch.Close();
++#endif
++        if (result != Core::SystemResultStatus::Success) {
++            program_switch.Cancel();
++            ShutdownEmulation(result);
++            return;
++        }
++
++        bool cancelled = false;
++        {
++            std::scoped_lock lock{mutex};
++            cancelled = program_switch.IsCancelled();
++            is_running = !cancelled;
++            is_paused = false;
++        }
++        if (cancelled) {
++            ShutdownEmulation(Core::SystemResultStatus::Success);
++            return;
++        }
++        RegisterCoreCallbacks();
++        // The worker remains the same owned thread. No recursive Launch(), no
++        // detached relaunch thread, and no emulation_thread self-join.
++    }
++}
++
++void EmulationSession::RunCurrentEmulation() {
+ #if defined(CITRON_IOS)
+     Common::IOS::RenderProbe::Scope probe_run{Common::IOS::RenderProbe::Stage::RunEmulation};
+ #endif
+@@ -587,10 +682,9 @@
+ #if defined(CITRON_IOS)
+     probe_run.Close();
+ #endif
+-    ShutdownEmulation(system.GetExitResult());
+-}
+-
+-void EmulationSession::ShutdownEmulation(Core::SystemResultStatus result) {
++}
++
++void EmulationSession::ShutdownEmulation(Core::SystemResultStatus result, bool notify_stopped) {
+     {
+     std::scoped_lock lock{mutex};
+     is_running = false;
+@@ -607,13 +701,25 @@
+     }
+ 
+     window.reset();
+-    if (on_stopped) {
+-        on_stopped(static_cast<int>(result));
+-    }
+     } // Release session mutex before joining the bounded recorder.
+ #if defined(CITRON_IOS)
+     Common::IOS::RenderProbe::recorder.End();
+ #endif
++    if (notify_stopped) {
++        NotifyEmulationStopped(result);
++    }
++}
++
++void EmulationSession::NotifyEmulationStopped(Core::SystemResultStatus result) {
++    LifecycleCallback stopped = nullptr;
++    {
++        std::scoped_lock lock{mutex};
++        stopped = on_stopped;
++    }
++    // Keep foreign callbacks outside the native session mutex.
++    if (stopped) {
++        stopped(static_cast<int>(result));
++    }
+ }
+ 
+ void EmulationSession::TouchPressed(int id, float x, float y) {
+diff --git a/src/ios/native.h b/src/ios/native.h
+--- a/src/ios/native.h
++++ b/src/ios/native.h
+@@ -16,6 +16,7 @@
+ #include "frontend_common/content_manager.h"
+ #include "input_common/main.h"
+ #include "ios/emu_window/emu_window.h"
++#include "ios/deferred_program_switch.h"
+ #include "video_core/rasterizer_interface.h"
+ 
+ namespace IOS {
+@@ -56,9 +57,13 @@
+     void ConfigureFilesystemProvider(const std::string& filepath);
+     void InitializeSystem(bool reload);
+     Core::SystemResultStatus InitializeEmulation(const std::string& filepath,
+-                                                 std::size_t program_index);
+-    void RunEmulation();
+-    void ShutdownEmulation(Core::SystemResultStatus result);
++                                                 std::size_t program_index,
++                                                 bool frontend_initiated);
++    void RunEmulation(const std::string& filepath);
++    void RunCurrentEmulation();
++    void ShutdownEmulation(Core::SystemResultStatus result, bool notify_stopped = true);
++    void NotifyEmulationStopped(Core::SystemResultStatus result);
++    void RegisterCoreCallbacks();
+ 
+     static void LoadDiskCacheProgress(VideoCore::LoadCallbackStage stage, int progress, int max);
+ 
+@@ -81,6 +86,9 @@
+     std::condition_variable_any cv;
+     mutable std::mutex mutex;
+     std::thread emulation_thread;
++    // Request callbacks run on guest workers. Only the session worker consumes
++    // their index, after shutdown has joined all old guest/CPU/detached work.
++    DeferredProgramSwitch program_switch;
+ 
+     LifecycleCallback on_started{};
+     LifecycleCallback on_stopped{};
+diff --git a/src/ios/deferred_program_switch.h b/src/ios/deferred_program_switch.h
+new file mode 100644
+--- /dev/null
++++ b/src/ios/deferred_program_switch.h
+@@ -0,0 +1,59 @@
++// SPDX-FileCopyrightText: Copyright 2026 RMS Citron iOS contributors
++// SPDX-License-Identifier: GPL-2.0-or-later
++#pragma once
++
++#include <atomic>
++#include <cstddef>
++#include <cstdint>
++#include <limits>
++#include <optional>
++
++namespace IOS {
++
++// A single deferred ExecuteProgram request, not a task queue. Guest callbacks
++// publish without acquiring the session mutex. Only the owned session worker
++// consumes, AFTER joining old guest/CPU/detached work. Frontend Stop cancels the
++// entire epoch. BeginSession is valid only after the preceding worker joined.
++static_assert(std::atomic<std::uint64_t>::is_always_lock_free,
++              "Deferred program switch requires lock-free 64-bit atomics");
++
++class DeferredProgramSwitch final {
++public:
++    static constexpr std::uint64_t MaxProgramIndex =
++        static_cast<std::uint64_t>(std::numeric_limits<std::int32_t>::max());
++
++    void BeginSession() noexcept { state.store(Idle, std::memory_order_release); }
++
++    bool Request(std::size_t index) noexcept {
++        if (index > MaxProgramIndex) {
++            return false;
++        }
++        auto expected = Idle;
++        return state.compare_exchange_strong(expected, static_cast<std::uint64_t>(index),
++                                              std::memory_order_acq_rel,
++                                              std::memory_order_acquire);
++    }
++
++    void Cancel() noexcept { state.store(Cancelled, std::memory_order_release); }
++
++    bool IsCancelled() const noexcept {
++        return state.load(std::memory_order_acquire) == Cancelled;
++    }
++
++    std::optional<std::size_t> TakePending() noexcept {
++        auto expected = state.load(std::memory_order_acquire);
++        if (expected > MaxProgramIndex ||
++            !state.compare_exchange_strong(expected, Idle, std::memory_order_acq_rel,
++                                            std::memory_order_acquire)) {
++            return std::nullopt;
++        }
++        return static_cast<std::size_t>(expected);
++    }
++
++private:
++    static constexpr auto Cancelled = std::numeric_limits<std::uint64_t>::max();
++    static constexpr auto Idle = Cancelled - 1;
++    std::atomic<std::uint64_t> state{Cancelled};
++};
++
++} // namespace IOS

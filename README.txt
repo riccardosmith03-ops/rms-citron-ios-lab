@@ -1,3 +1,22 @@
+V17 PRIVATE iOS ExecuteProgram SOURCE CANDIDATE — NOT BUILT OR DEVICE TESTED
+This candidate fills an independently observed iOS frontend feature gap: Core's
+ExecuteProgram callback was not registered, although the pinned Qt/Android
+frontends support program-index handoff within a container. The guest callback
+now records a bounded index without joining/tearing down its own worker. The same
+owned session thread drains old Core/GPU/CPU/detached work, preserves UserChannel,
+and loads the requested index with ApplicationInitiated. Explicit frontend Stop
+cancels a pending or initializing handoff. Each successful Load re-registers the
+pending-aware exit callback AFTER setting is_running. A final Core error cancels
+a concurrent handoff. Only the final stopped notification reaches Swift.
+
+No Mario ExecuteProgram trigger, crash fix, lower RAM use or stable gameplay is
+proven. This correction does not change retained guest backing or the allocator
+memory policy. The carrier adds no warm-backing
+discard, NSO direct-decode, guest-RAM/FPS policy, GPU/resource or signing change.
+Existing five host tests and the V16 VMA64 policy remain. The new real C++ atomic
+policy test MUST pass before the iOS build; it is not a full Core/device test.
+The candidate has not been compiled or installed. Historical notes follow.
+
 V16 PRIVATE iOS VMA64 SOURCE CANDIDATE — NOT BUILT OR DEVICE TESTED
 The only new runtime policy in this candidate is CITRON_IOS's Vulkan allocator
 preferredLargeHeapBlockSize=64 MiB. Other platforms retain0, selecting VMA3.1's
