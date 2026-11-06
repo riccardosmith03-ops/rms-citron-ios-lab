@@ -2087,3 +2087,260 @@ new file mode 100644
      }
  };
  
+--- a/src/core/hle/kernel/code_set.h
++++ b/src/core/hle/kernel/code_set.h
+@@ -90,2 +90,9 @@
+ 
++#if defined(CITRON_IOS) && !defined(HAS_NCE)
++    // Nonzero only for an unpatched NSO initialized prefix with an implicit
++    // zero tail. KProcess must prove its fresh/disjoint allocation or rebuild
++    // the original dense image before writing. Layout and permissions stay full-size.
++    std::size_t ios_zero_tail_full_size = 0;
++#endif
++
+     /// The segments that comprise this code set.
+--- a/src/core/hle/kernel/k_process.h
++++ b/src/core/hle/kernel/k_process.h
+@@ -20,2 +20,5 @@
+ #include "core/memory.h"
++#if defined(CITRON_IOS) && !defined(HAS_NCE)
++#include "common/ios_initial_code_zero.h"
++#endif
+ 
+@@ -131,2 +134,5 @@
+     Core::Memory::Memory m_memory;
++#if defined(CITRON_IOS) && !defined(HAS_NCE)
++    Common::IOS::InitialCodeZeroState m_initial_code_zero;
++#endif
+ 
+--- a/src/core/hle/kernel/k_process.cpp
++++ b/src/core/hle/kernel/k_process.cpp
+@@ -10,2 +10,5 @@
+ #include "core/core.h"
++#if defined(CITRON_IOS) && !defined(HAS_NCE)
++#include <cstdlib>
++#endif
+ #include "core/gpu_dirty_memory_manager.h"
+@@ -136,2 +139,5 @@
+ void KProcess::Finalize() {
++#if defined(CITRON_IOS) && !defined(HAS_NCE)
++    m_initial_code_zero.Invalidate();
++#endif
+     // Delete the process local region.
+@@ -197,2 +203,5 @@
+                             bool is_real) {
++#if defined(CITRON_IOS) && !defined(HAS_NCE)
++    m_initial_code_zero.Invalidate();
++#endif
+     // TODO: remove this special case
+@@ -274,2 +283,5 @@
+                             KMemoryManager::Pool pool, bool immortal) {
++#if defined(CITRON_IOS) && !defined(HAS_NCE)
++    m_initial_code_zero.Invalidate();
++#endif
+     assert(res_limit != nullptr);
+@@ -368,2 +380,5 @@
+                             KMemoryManager::Pool pool, KProcessAddress aslr_space_start) {
++#if defined(CITRON_IOS) && !defined(HAS_NCE)
++    m_initial_code_zero.Invalidate();
++#endif
+     assert(res_limit != nullptr);
+@@ -467,2 +482,9 @@
+     R_TRY(this->Initialize(params, res_limit, true));
++#if defined(CITRON_IOS) && !defined(HAS_NCE)
++    // AllocateAndMapPagesImpl cleared this entire newly-owned range before mapping.
++    // The pinned process page-table initializer selects fill_memory=false (zero).
++    // Arm only after the complete successful initializer, including its common
++    // state initialization. The preexisting-physical-page initializer never arms.
++    m_initial_code_zero.Arm(params.code_address, code_size);
++#endif
+ 
+@@ -1176,2 +1198,5 @@
+                                   KProcessAddress aslr_space_start, bool is_hbl) {
++#if defined(CITRON_IOS) && !defined(HAS_NCE)
++    m_initial_code_zero.Invalidate();
++#endif
+     // Create a resource limit for the process.
+@@ -1264,3 +1289,37 @@
+ 
++#if defined(CITRON_IOS) && !defined(HAS_NCE)
++    const bool initial_created = m_is_initialized && m_state == State::Created;
++    const size_t prefix_size = code_set.memory.size();
++    const bool sparse_candidate = code_set.ios_zero_tail_full_size != 0;
++    bool sparse_admitted = false;
++    size_t full_size = code_set.memory.size();
++    if (code_set.ios_zero_tail_full_size != 0) {
++        full_size = code_set.ios_zero_tail_full_size;
++        if (full_size < code_set.memory.size()) {
++            // Impossible for the checked loader; never silently shrink initialized bytes.
++            LOG_CRITICAL(Kernel, "IOS_NSO_ZERO_TAIL_FATAL status=1");
++            std::abort();
++        }
++        sparse_admitted = m_initial_code_zero.CanElideTail(GetInteger(base_addr), prefix_size,
++                                                         full_size, initial_created);
++        if (!sparse_admitted) {
++            // Retain legacy dense semantics when fresh/exclusive zero bytes cannot
++            // be proven. This value-initializes only the omitted trailing zero range.
++            code_set.memory.resize(full_size);
++        }
++    }
++    const bool copied = this->GetMemory().WriteBlock(base_addr, code_set.memory.data(),
++                                                    code_set.memory.size());
++    // Includes the full implicit tail, even though it was never copied/touched.
++    m_initial_code_zero.Consume(GetInteger(base_addr), full_size, initial_created, copied);
++    static std::atomic<unsigned> diagnostic_slots{};
++    if (const auto slot = Common::IOS::TakeInitialCodeDiagnostic(diagnostic_slots)) {
++        LOG_INFO(Kernel, "IOS_NSO_ZERO_TAIL slot={} prefix_bytes={} logical_span_bytes={} "
++                        "zero_tail_bytes={} sparse_candidate={} consumer_admitted={} guard_fallback={} copied={}",
++                 slot, prefix_size, full_size, full_size - prefix_size, u32(sparse_candidate),
++                 u32(sparse_admitted), u32(sparse_candidate && !sparse_admitted), u32(copied));
++    }
++#else
+     this->GetMemory().WriteBlock(base_addr, code_set.memory.data(), code_set.memory.size());
++#endif
+ 
+--- a/src/core/loader/nso.cpp
++++ b/src/core/loader/nso.cpp
+@@ -22,2 +22,5 @@
+ #include "core/loader/nso.h"
++#if defined(CITRON_IOS) && !defined(HAS_NCE)
++#include "common/ios_initial_code_zero.h"
++#endif
+ #if defined(CITRON_IOS) && !defined(HAS_NCE)
+@@ -156,2 +159,6 @@
+     Kernel::PhysicalMemory program_image;
++#if defined(CITRON_IOS) && !defined(HAS_NCE)
++    bool ios_segments_exact_ordered = module_start == 0;
++    std::uint64_t ios_previous_segment_end = 0;
++#endif
+     for (std::size_t i = 0; i < nso_header.segments.size(); ++i) {
+@@ -162,2 +169,12 @@
+         }
++#if defined(CITRON_IOS) && !defined(HAS_NCE)
++        const auto ios_segment_begin = static_cast<std::uint64_t>(nso_header.segments[i].location);
++        const auto ios_segment_end = ios_segment_begin + data.size();
++        ios_segments_exact_ordered = ios_segments_exact_ordered &&
++            data.size() == nso_header.segments[i].size &&
++            ios_segment_begin >= ios_previous_segment_end &&
++            ios_segment_end <= std::numeric_limits<u32>::max() &&
++            nso_header.segments[i].size <= std::numeric_limits<u32>::max() - Core::Memory::CITRON_PAGEMASK;
++        ios_previous_segment_end = ios_segment_end;
++#endif
+         program_image.resize(module_start + nso_header.segments[i].location +
+@@ -188,3 +205,5 @@
+         PageAlignSizeNSO(static_cast<u32>(program_image.size()) + nso_header.segments[2].bss_size)};
++#if !defined(CITRON_IOS) || defined(HAS_NCE)
+     program_image.resize(image_size);
++#endif
+ 
+@@ -203,2 +222,17 @@
+         has_nso_patch || (load_into_process && Settings::values.dump_nso);
++#if defined(CITRON_IOS) && !defined(HAS_NCE)
++    // Reuse the one existing patch decision below: never race a second mod query.
++    // Actual initialized bytes/arguments remain dense. Only BSS/final zero padding
++    // may stay implicit, and KProcess independently verifies fresh disjoint zeros.
++    const bool ios_data_size_supported = static_cast<std::uint64_t>(nso_header.segments[2].size) +
++        nso_header.segments[2].bss_size <= std::numeric_limits<u32>::max() - Core::Memory::CITRON_PAGEMASK;
++    const auto ios_zero_tail = Common::IOS::NsoZeroTailFullSize(
++        program_image.size(), nso_header.segments[2].bss_size, image_size,
++        ios_segments_exact_ordered && ios_data_size_supported, load_into_process, should_patch_nso);
++    if (ios_zero_tail) {
++        codeset.ios_zero_tail_full_size = *ios_zero_tail;
++    } else {
++        program_image.resize(image_size); // Exact legacy path for mods/dump/malformed/layout.
++    }
++#endif
+     if (pm && should_patch_nso) {
+--- /dev/null
++++ b/src/common/ios_initial_code_zero.h
+@@ -0,0 +1,79 @@
++// SPDX-FileCopyrightText: Copyright 2026 RMS contributors
++// SPDX-License-Identifier: GPL-2.0-or-later
++#pragma once
++
++#include <atomic>
++#include <cstddef>
++#include <cstdint>
++#include <limits>
++#include <optional>
++
++namespace Common::IOS {
++
++// Pure checked eligibility for the existing NSO dense prefix + BSS + page padding.
++// No byte-content inference: all arguments/reserved argument bytes remain materialized.
++inline std::optional<std::uint32_t> NsoZeroTailFullSize(std::size_t prefix_bytes,
++                                                      std::uint32_t bss_bytes,
++                                                      std::uint32_t legacy_full_size,
++                                                      bool segments_exact_ordered,
++                                                      bool load_into_process,
++                                                      bool patch_or_dump) noexcept {
++    constexpr std::uint64_t max = std::numeric_limits<std::uint32_t>::max();
++    constexpr std::uint64_t mask = 4095;
++    if (!segments_exact_ordered || !load_into_process || patch_or_dump || prefix_bytes > max ||
++        bss_bytes > max - prefix_bytes || prefix_bytes + bss_bytes > max - mask) {
++        return std::nullopt;
++    }
++    const auto full = (static_cast<std::uint64_t>(prefix_bytes) + bss_bytes + mask) & ~mask;
++    if (full != legacy_full_size || full <= prefix_bytes) {
++        return std::nullopt;
++    }
++    return static_cast<std::uint32_t>(full);
++}
++
++// Value-only bookkeeping: Arm may be called ONLY after a new code allocation has
++// actually been cleared to zero. It records no pointer and performs no VM action.
++// Every dense OR sparse module consumes its full span. Overlap, a failed copy or
++// a non-Created process permanently invalidates this initial-allocation proof.
++class InitialCodeZeroState {
++public:
++    void Arm(std::uint64_t base, std::uint64_t size) noexcept {
++        valid = size != 0 && size <= std::numeric_limits<std::uint64_t>::max() - base;
++        begin = next = base;
++        end = valid ? base + size : base;
++    }
++
++    void Invalidate() noexcept { valid = false; }
++
++    bool CanConsume(std::uint64_t base, std::uint64_t full_size, bool created) const noexcept {
++        return valid && created && base >= begin && base >= next && base <= end &&
++               full_size <= end - base;
++    }
++
++    bool CanElideTail(std::uint64_t base, std::uint64_t prefix_size,
++                      std::uint64_t full_size, bool created) const noexcept {
++        return full_size > prefix_size && CanConsume(base, full_size, created);
++    }
++
++    void Consume(std::uint64_t base, std::uint64_t full_size, bool created, bool copied) noexcept {
++        if (!copied || !CanConsume(base, full_size, created)) {
++            Invalidate();
++            return;
++        }
++        next = base + full_size; // CanConsume subtraction check proves no overflow.
++    }
++
++private:
++    std::uint64_t begin = 0, end = 0, next = 0;
++    bool valid = false;
++};
++
++inline unsigned TakeInitialCodeDiagnostic(std::atomic<unsigned>& counter) noexcept {
++    auto slot = counter.load(std::memory_order_relaxed);
++    while (slot < 16) {
++        if (counter.compare_exchange_weak(slot, slot + 1, std::memory_order_relaxed)) return slot + 1;
++    }
++    return 0; // Hard per-process bound; no overflow/re-enabled records.
++}
++
++} // namespace Common::IOS
+--- a/src/ios/native.cpp
++++ b/src/ios/native.cpp
+@@ -314,6 +314,8 @@
+ }
+ 
+ void ConfigureIOSRuntimeSettings() {
++    // Match the mobile hardware profile before guest AM/VI services observe it.
++    Settings::values.use_docked_mode.SetValue(Settings::ConsoleMode::Handheld);
+     Settings::values.sink_id.SetValue(Settings::AudioEngine::Auto);
+     Settings::values.audio_output_device_id.SetValue("auto");
+     Settings::values.audio_input_device_id.SetValue("null");

@@ -1,3 +1,13 @@
+V19 source candidate: initial unpatched NSO loads may keep only their initialized
+prefix in a temporary code image while preserving the full mapped BSS/padded range.
+A fresh-zero allocation/disjoint-write proof is required; patched, layout-only,
+NRO/KIP/NCE and unproven paths retain dense behavior. The iOS frontend now selects
+the supported Handheld console profile. Host tests cover the actual eligibility
+helper, dense-vs-implicit byte behavior, ownership invalidation and checked bounds.
+These source changes are not a claim of physical-memory savings or stable gameplay
+until compilation and controlled runtime tests complete. Existing diagnostics and
+all earlier host gates remain. No live guest/GPU page purge is added.
+
 V18 PRIVATE SDK-COMPATIBILITY FIX CANDIDATE - NOT BUILT OR DEVICE TESTED
 This revision adjusts the backing-probe header and its actual-header test for
 the iPhoneOS SDK. Before the full application configure/compile, the build now

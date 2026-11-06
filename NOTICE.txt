@@ -1,3 +1,7 @@
+V19 source addition: initial NSO zero-tail bookkeeping and its pure helper/regressions
+are GPL-2.0-or-later as declared in their source headers. Existing license headers
+and COPYING remain retained. The iOS frontend selects the existing Handheld mode.
+
 Experimental Citron iPhoneOS build carrier V10 lifecycle candidate.
 V9 was built and installed on an iPhone 11; original homebrew checksum and
 frame progress were verified on device. V10 is not yet built or device-tested.

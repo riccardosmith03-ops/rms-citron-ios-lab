@@ -82,6 +82,17 @@ r=pathlib.Path(sys.argv[1]).resolve(strict=True)
 assert not (r/'src/common/ios_backing_probe.h').exists(),'Backing-residency helper already exists'
 PY_IOS_BACKING_RESIDENCY_BEFORE
 
+# V19: bind new process/NSO zero-tail proof inputs before any patch.
+python3 - "$source_dir" <<'PY_IOS_NSO_ZERO_TAIL_BEFORE'
+import hashlib,pathlib,sys
+r=pathlib.Path(sys.argv[1]).resolve(strict=True)
+for name,digest in {'src/core/hle/kernel/code_set.h': '53ff513141efb2572f5de562d90ed1168f32f3b52b13ba1c70288ec5e6f1fbbe', 'src/core/hle/kernel/k_process.h': '5345673873ee6ee35b80544cc3f48c6ecff97cb9ea0336414958567bc51576bc', 'src/core/hle/kernel/k_process.cpp': '56ae325f2dbcf194a4ae1b6d2270bb2bf319ea5f9ebc475550ef337a1929ec4e'}.items():
+ p=r/name
+ assert not p.is_symlink() and p.resolve(strict=True).is_relative_to(r)
+ assert hashlib.sha256(p.read_bytes()).hexdigest()==digest,'Unexpected initial-code zero source: '+name
+assert not (r/'src/common/ios_initial_code_zero.h').exists(),'Initial-code zero helper already exists'
+PY_IOS_NSO_ZERO_TAIL_BEFORE
+
 while IFS= read -r patch_name; do
     [[ -n "$patch_name" && "$patch_name" != \#* ]] || continue
     [[ "$patch_name" != */* && "$patch_name" == *.patch ]] || exit 5
@@ -90,6 +101,26 @@ while IFS= read -r patch_name; do
     git -C "$source_dir" apply --check "$patch_file"
     git -C "$source_dir" apply "$patch_file"
 done < "$project_dir/patches/series.txt"
+
+# V19: actual NSO policy/source and combined original ownership regression.
+python3 - "$source_dir" "$project_dir/tests/virtual-buffer-ownership.cpp" <<'PY_IOS_NSO_ZERO_TAIL_AFTER'
+import hashlib,pathlib,sys
+r=pathlib.Path(sys.argv[1]).resolve(strict=True)
+for name,digest in {'src/core/hle/kernel/code_set.h': '084247a8fa44a46ea8f6b59d2f423026b241e6cfe3583ec28da788a3d9ee9754', 'src/core/hle/kernel/k_process.h': 'd0af4187af6ee13bcf1927c00b69fff21dda9ed1e450fa68e7a2209b0fe07326', 'src/core/hle/kernel/k_process.cpp': '7130855113722fd098376e749b593927a02f048863394c6d40240dbffe3caf7b', 'src/core/loader/nso.cpp': 'adda5f1894843c4a23ff9293a69cb4643070c2952698335900be4e6fde76f3ac', 'src/common/ios_initial_code_zero.h': '8b8ab105e02e232acc5505ecc9c74e9a6ebd187a6075c9d0e36a92b9bdfdb6b9'}.items():
+ p=r/name
+ assert not p.is_symlink() and p.resolve(strict=True).is_relative_to(r)
+ assert hashlib.sha256(p.read_bytes()).hexdigest()==digest,'Unexpected NSO zero-tail source: '+name
+assert hashlib.sha256(pathlib.Path(sys.argv[2]).read_bytes()).hexdigest()=='bc12762fbada61e6e87e08261e05d2d72526789b9e9f9ea29f4b0de10f770ff7','Combined ownership/NSO regression changed'
+PY_IOS_NSO_ZERO_TAIL_AFTER
+mkdir -p "$deps/build"
+# This ownership test runs as a HOST Mac process, with iPhoneOS flags explicitly unset.
+env -u SDKROOT -u IPHONEOS_DEPLOYMENT_TARGET -u CFLAGS -u CXXFLAGS -u CPPFLAGS -u LDFLAGS \
+    xcrun --sdk macosx clang++ -std=c++23 -UNDEBUG -DCITRON_IOS=1 \
+    -isysroot "$(xcrun --sdk macosx --show-sdk-path)" \
+    -I "$source_dir/src" "$project_dir/tests/virtual-buffer-ownership.cpp" \
+    -o "$deps/build/ownership-host-test"
+"$deps/build/ownership-host-test" | tee "$deps/build/ownership-host-test.log"
+grep -Fx 'PASS_NSO_INITIAL_ZERO_TAIL_DIFFERENTIAL_2048_AND_OWNERSHIP_NOT_IOS_RUNTIME_PROOF' "$deps/build/ownership-host-test.log"
 
 # V18: read-only own-backing attribution; real header and host API tests gate the build.
 python3 - "$source_dir" <<'PY_IOS_BACKING_RESIDENCY_AFTER'
@@ -396,7 +427,7 @@ echo PASS_IPHONEOS17_4_BACKING_PROBE_COMPILE_LINK_NOT_RUNTIME_PROOF
 python3 - "$source_dir" <<'PY_IOS_PROGRAM_SWITCH_AFTER'
 import hashlib,pathlib,sys
 r=pathlib.Path(sys.argv[1]).resolve(strict=True)
-for name,digest in {'src/ios/native.cpp':'9e5955ade24205139d1ac26070c65fa2ae7a76feb0bdaf4bc1c8fb34e9962975','src/ios/native.h':'937da682e97bd810db2d622f531a5bfb4c04d9ac1f273ca41a61339966585ff5','src/ios/deferred_program_switch.h':'653c628d96a6364378797ed87efca582a072ec19af4f3999e8946576c1424fac'}.items():
+for name,digest in {'src/ios/native.cpp':'5a0f259bdef250f247ecf0bb580bb734314414d426c0fb5eb7b5f4db5b1872aa','src/ios/native.h':'937da682e97bd810db2d622f531a5bfb4c04d9ac1f273ca41a61339966585ff5','src/ios/deferred_program_switch.h':'653c628d96a6364378797ed87efca582a072ec19af4f3999e8946576c1424fac'}.items():
  p=r/name
  assert not p.is_symlink() and p.resolve(strict=True).is_relative_to(r)
  assert hashlib.sha256(p.read_bytes()).hexdigest()==digest,'Unexpected V17 program-switch source: '+name
@@ -524,7 +555,7 @@ PY_IOS_VMA_BLOCK64_AFTER
 python3 - "$source_dir" <<'PY_IOS_NSO_LAYOUT_AFTER'
 import hashlib,pathlib,sys
 r=pathlib.Path(sys.argv[1]).resolve(strict=True)
-for name,digest in {'src/core/loader/nso.cpp':'1f5253d0f45be5bb692806cf5e5d0f2df750b8a6eadb8209ac3c03820858f3ef','src/core/loader/nso_layout_size.h':'ecdaabc7ae6f65d66e9f9e80abcb8377a748f211cf2daa37377c9f1daae3dc04'}.items():
+for name,digest in {'src/core/loader/nso.cpp':'adda5f1894843c4a23ff9293a69cb4643070c2952698335900be4e6fde76f3ac','src/core/loader/nso_layout_size.h':'ecdaabc7ae6f65d66e9f9e80abcb8377a748f211cf2daa37377c9f1daae3dc04'}.items():
  p=r/name
  assert not p.is_symlink() and p.resolve(strict=True).is_relative_to(r)
  assert hashlib.sha256(p.read_bytes()).hexdigest()==digest,'Unexpected NSO layout-elision source: '+name
@@ -674,7 +705,7 @@ PY_IOS_MEMORY_DIAGNOSTICS_AFTER
 python3 - "$source_dir" <<'PY_IOS_RENDER_PROBE_AFTER'
 import hashlib,pathlib,sys
 r=pathlib.Path(sys.argv[1]).resolve(strict=True)
-for name,digest in {'src/ios/native.cpp': '9e5955ade24205139d1ac26070c65fa2ae7a76feb0bdaf4bc1c8fb34e9962975', 'src/ios/emu_window/emu_window.cpp': 'f12d486c2bc2c6744ef4b58fcd68f6b9fa3c13b618cf2d4cce11d3d09291410a', 'src/core/hle/service/nvdrv/devices/nvhost_gpu.cpp': 'b4100833090b1c8069eb56b026de4935e3b9cbd8258f97bc8cf96eb342278308', 'src/video_core/gpu_thread.cpp': '68a0dae863b143765d968598c760193b4f0d034e46590c970faa16b40ca18d14', 'src/core/hle/service/nvnflinger/buffer_queue_producer.cpp': 'a308d2b1f86d40ef0739a0a9043a4b48fe24b20f5c77deb61f47c1253b029b94', 'src/core/hle/service/nvnflinger/hardware_composer.cpp': '16452f72b00f005d5c98abfa24fc2e2bcf8ef9eaa06abfbd5734c57c417efa6d', 'src/video_core/gpu.cpp': 'bf00efab550e4528d07b639a2a886e1f99ee34cfa5910c17a8951c8c2fa885ee', 'src/video_core/renderer_vulkan/renderer_vulkan.cpp': '5fac00a19a35dd09554e7a255257eabeecaef2415a65b9f41c67ab69055a9578', 'src/video_core/renderer_vulkan/vk_present_manager.cpp': '2b9eb2464bc3eb4a4683c0d0b5a9a6522b78efdfaae7da95a22dd24860d83108', 'src/core/device_memory_manager.inc': '9202e645c29abfbf8c0ae81cec8b5445d79b8d84f45ff77219173a3e14772509', 'src/ios/jit_icache_callbacks_ios.cpp': '5a06b39329d23a189fc40fbb454b2b86dd1b6ec117d3a55e5fb2b5ae1c64f939', 'src/common/ios_render_probe.h': '10d747d48e4c21275a7d74909b5032e263008231a889e98002517e903151b52d'}.items():
+for name,digest in {'src/ios/native.cpp': '5a0f259bdef250f247ecf0bb580bb734314414d426c0fb5eb7b5f4db5b1872aa', 'src/ios/emu_window/emu_window.cpp': 'f12d486c2bc2c6744ef4b58fcd68f6b9fa3c13b618cf2d4cce11d3d09291410a', 'src/core/hle/service/nvdrv/devices/nvhost_gpu.cpp': 'b4100833090b1c8069eb56b026de4935e3b9cbd8258f97bc8cf96eb342278308', 'src/video_core/gpu_thread.cpp': '68a0dae863b143765d968598c760193b4f0d034e46590c970faa16b40ca18d14', 'src/core/hle/service/nvnflinger/buffer_queue_producer.cpp': 'a308d2b1f86d40ef0739a0a9043a4b48fe24b20f5c77deb61f47c1253b029b94', 'src/core/hle/service/nvnflinger/hardware_composer.cpp': '16452f72b00f005d5c98abfa24fc2e2bcf8ef9eaa06abfbd5734c57c417efa6d', 'src/video_core/gpu.cpp': 'bf00efab550e4528d07b639a2a886e1f99ee34cfa5910c17a8951c8c2fa885ee', 'src/video_core/renderer_vulkan/renderer_vulkan.cpp': '5fac00a19a35dd09554e7a255257eabeecaef2415a65b9f41c67ab69055a9578', 'src/video_core/renderer_vulkan/vk_present_manager.cpp': '2b9eb2464bc3eb4a4683c0d0b5a9a6522b78efdfaae7da95a22dd24860d83108', 'src/core/device_memory_manager.inc': '9202e645c29abfbf8c0ae81cec8b5445d79b8d84f45ff77219173a3e14772509', 'src/ios/jit_icache_callbacks_ios.cpp': '5a06b39329d23a189fc40fbb454b2b86dd1b6ec117d3a55e5fb2b5ae1c64f939', 'src/common/ios_render_probe.h': '10d747d48e4c21275a7d74909b5032e263008231a889e98002517e903151b52d'}.items():
  p=r/name
  assert not p.is_symlink() and p.resolve(strict=True).is_relative_to(r)
  assert hashlib.sha256(p.read_bytes()).hexdigest()==digest,'Unexpected render-probe source: '+name
@@ -701,12 +732,12 @@ for name,digest in expected_api.items():
  assert hashlib.sha256(p.read_bytes()).hexdigest()==digest, 'Unexpected pinned filesystem API: '+name
 p=root/'src/ios/native.cpp'
 assert not p.is_symlink() and p.resolve(strict=True).is_relative_to(root)
-assert hashlib.sha256(p.read_bytes()).hexdigest()=='9e5955ade24205139d1ac26070c65fa2ae7a76feb0bdaf4bc1c8fb34e9962975', 'Unexpected post-series iOS native source'
+assert hashlib.sha256(p.read_bytes()).hexdigest()=='5a0f259bdef250f247ecf0bb580bb734314414d426c0fb5eb7b5f4db5b1872aa', 'Unexpected post-series iOS native source'
 patch='--- a/src/ios/native.cpp\n+++ b/src/ios/native.cpp\n@@ -407,7 +407,7 @@\n     system.SetContentProvider(std::make_unique<FileSys::ContentProviderUnion>());\n     system.RegisterContentProvider(FileSys::ContentProviderUnionSlot::FrontendManual,\n                                    manual_provider.get());\n-    system.GetFileSystemController().CreateFactories(*vfs);\n+    system.GetFileSystemController().InitializeContentSystem(*vfs);\n }\n \n Core::SystemResultStatus EmulationSession::InitializeEmulation(const std::string& filepath,\n'
 assert hashlib.sha256(patch.encode('utf-8')).hexdigest()=='2bb101b99ea16a2e8c00d80c9fd0962e12335acfbe7ea438e9b8c5e270146726', 'Embedded iOS content-system patch changed'
 subprocess.run(['git','-c','core.autocrlf=false','-C',str(root),'apply','--check','-'],input=patch.encode('utf-8'),check=True)
 subprocess.run(['git','-c','core.autocrlf=false','-C',str(root),'apply','-'],input=patch.encode('utf-8'),check=True)
-assert hashlib.sha256(p.read_bytes()).hexdigest()=='b5cedd3f31ce8df7109c9dceacaf9502204e10c33a47e08ae60f6f95642ad402', 'Patched iOS native source differs'
+assert hashlib.sha256(p.read_bytes()).hexdigest()=='885ea625e395757457ba3bf744f79ffd77b61de63c5d171136707bcc7acc9ba3', 'Patched iOS native source differs'
 print('iOS content initialization now uses the pinned public entrypoint and its default overwrite policy; lifecycle and platform initialization stage preserved.')
 PY_IOS_CONTENT_SYSTEM_API
 
@@ -879,13 +910,6 @@ xcrun vtool -show-build "$probe_build/cubeb-ios-link-probe" | tee "$probe_build/
 grep -Eq 'platform[[:space:]]+IOS$' "$probe_build/platform.txt"
 echo 'Patched Cubeb native iPhoneOS compile+link gate passed; executable NOT RUN.'
 
-# This ownership test runs as a HOST Mac process, with iPhoneOS flags explicitly unset.
-env -u SDKROOT -u IPHONEOS_DEPLOYMENT_TARGET -u CFLAGS -u CXXFLAGS -u CPPFLAGS -u LDFLAGS \
-    xcrun --sdk macosx clang++ -std=c++23 \
-    -isysroot "$(xcrun --sdk macosx --show-sdk-path)" \
-    -I "$source_dir/src" "$project_dir/tests/virtual-buffer-ownership.cpp" \
-    -o "$deps/build/ownership-host-test"
-"$deps/build/ownership-host-test"
 
 # Host Mac-owned anonymous mmap semantics only: this is NOT an iOS runtime test.
 cat > "$deps/build/ios-lazy-zero-host.cpp" <<'CPP_IOS_LAZY_ZERO_HOST'
