@@ -201,3 +201,33 @@ V18 backing-probe SDK compatibility repair:
   the existing GPL-2.0-or-later source notices. The iPhoneOS check is not executed.
   Native session and RAM/resource policies are unchanged. No device data, guest
   content, media, keys or account information are part of this source revision.
+
+
+V20 build-source availability (source-only, not a runtime result)
+The previously pinned upstream GitHub endpoint is unavailable. This carrier
+includes the byte-identical original upstream source archive downloaded earlier,
+under vendor/citron-source-c3aa70f81.tar.gz (9,197,796 bytes).
+SHA256: f65d17c8fcdc46046422d024eaa5ab49be43ec5ec4655eeffb0562efcac61349
+Upstream commit label: c3aa70f81e15ea97ee85b6a9a71cbf75d370851e.
+The archive retains its original LICENSE and LICENSES files. The build validates
+the archive, every member type/path, and the file-only Git snapshot tree before
+applying the existing patches. Snapshot history is local build scaffolding, not
+a reconstructed upstream commit. There are no games, console firmware, console
+keys, personal data or device reports in this added original source archive.
+
+
+V20 iOS shader compiler scratch ownership correction
+The original ObjectPool Chunk::Release destroyed Storage unions whose destructor
+was empty, instead of destroying their active T objects. On iOS, release now
+explicitly destroys T, releasing its nested allocations. The live-slot counter
+is committed only after successful construction, so exception cleanup cannot
+destroy an unconstructed object. At completed runtime graphics/compute compiler
+boundaries, unused instruction/block/flow slot arrays are trimmed to a retained
+8+1+1 MiB budget; active translation, compiled pipelines, guest memory and GPU
+resources are not capped or discarded. Non-iOS behavior is preserved.
+The build runs a production-header negative control, actual patched pool/IR
+regressions and an ASan/UBSan host run before compiling the iPhone app. These
+host checks do not prove that Mario's memory termination is fixed on iPhone.
+No per-process memory limit, global OS limit, frame rate or signing policy is
+changed by this source revision. A separate private per-PID headroom experiment
+remains a controlled future device test, not a persistent feature of this app.

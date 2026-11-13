@@ -4,3 +4,4 @@
 0004-ios-runtime-guards.patch
 0005-common-virtual-buffer-move.patch
 # Oaknut's patch is applied separately inside the pinned submodule by the build script.
+0006-ios-shader-pool-storage.patch

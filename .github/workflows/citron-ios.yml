@@ -17,6 +17,7 @@ jobs:
     env:
       HOMEBREW_NO_AUTO_UPDATE: '1'
       CITRON_COMMIT: c3aa70f81e15ea97ee85b6a9a71cbf75d370851e
+      CITRON_SOURCE_ARCHIVE_SHA256: f65d17c8fcdc46046422d024eaa5ab49be43ec5ec4655eeffb0562efcac61349
       CODE_SIGNING_ALLOWED: 'NO'
       CODE_SIGNING_REQUIRED: 'NO'
       CODE_SIGN_IDENTITY: ''
@@ -38,15 +39,48 @@ jobs:
           cmake --version | tee dist/cmake-version.txt
           command -v glslangValidator
 
-      - name: Fetch the fixed official source commit
+      - name: Restore the verified original upstream source archive
         shell: bash
         run: |
           set -euo pipefail
+          python3 - vendor/citron-source-c3aa70f81.tar.gz "$RUNNER_TEMP/citron-source" <<'PY_VERIFIED_SOURCE'
+          import hashlib,os,pathlib,shutil,sys,tarfile
+          archive=pathlib.Path(sys.argv[1]);destination=pathlib.Path(sys.argv[2])
+          assert not destination.exists(), 'Refusing an existing source destination'
+          assert archive.is_file() and not archive.is_symlink() and archive.stat().st_size==9197796
+          assert hashlib.sha256(archive.read_bytes()).hexdigest()==os.environ['CITRON_SOURCE_ARCHIVE_SHA256']=='f65d17c8fcdc46046422d024eaa5ab49be43ec5ec4655eeffb0562efcac61349'
+          prefix='emulator-c3aa70f81e15ea97ee85b6a9a71cbf75d370851e'
+          with tarfile.open(archive,'r:gz') as bundle:
+           members=bundle.getmembers();assert len(members)==4729
+           seen=set();total=0
+           for member in members:
+            relative=pathlib.PurePosixPath(member.name)
+            assert not relative.is_absolute() and '..' not in relative.parts and relative.parts[0]==prefix
+            assert member.isdir() or member.isreg(), 'Links and special source entries refused'
+            if member.isdir():continue
+            relative=pathlib.PurePosixPath(*relative.parts[1:])
+            assert relative.parts and '.git' not in relative.parts and relative.as_posix() not in seen
+            seen.add(relative.as_posix());assert 0<=member.size<20*1024*1024
+            total+=member.size;assert total<150*1024*1024
+           assert len(seen)==4289 and total==53773692
+           destination.mkdir(mode=0o755)
+           for member in members:
+            if not member.isreg():continue
+            relative=pathlib.PurePosixPath(*pathlib.PurePosixPath(member.name).parts[1:])
+            target=destination.joinpath(*relative.parts)
+            target.parent.mkdir(parents=True,exist_ok=True)
+            with bundle.extractfile(member) as incoming,target.open('xb') as output:
+             shutil.copyfileobj(incoming,output,length=1024*1024)
+            assert target.stat().st_size==member.size
+            target.chmod(0o755 if member.mode&0o111 else 0o644)
+          print('PASS_PINNED_SOURCE_ARCHIVE_CONTENTS_NOT_RUNTIME_PROOF')
+          PY_VERIFIED_SOURCE
           git init "$RUNNER_TEMP/citron-source"
-          git -C "$RUNNER_TEMP/citron-source" remote add origin https://github.com/citron-neo/emulator.git
-          git -C "$RUNNER_TEMP/citron-source" fetch --depth=1 origin "$CITRON_COMMIT"
-          git -C "$RUNNER_TEMP/citron-source" checkout --detach FETCH_HEAD
-          test "$(git -C "$RUNNER_TEMP/citron-source" rev-parse HEAD)" = "$CITRON_COMMIT"
+          git -C "$RUNNER_TEMP/citron-source" config core.autocrlf false
+          git -C "$RUNNER_TEMP/citron-source" -c core.autocrlf=false -c core.filemode=true add --all --force
+          test "$(git -C "$RUNNER_TEMP/citron-source" write-tree)" = "12b651a8f494087aaef84dd8d92ceb1d6fe2f315"
+          git -C "$RUNNER_TEMP/citron-source" -c user.name='Citron source snapshot' -c user.email='source-snapshot@example.invalid' -c commit.gpgsign=false commit -m 'Verified original upstream archive c3aa70f81'
+          test -z "$(git -C "$RUNNER_TEMP/citron-source" status --porcelain)"
 
       - name: Build verified iPhoneOS dependencies
         shell: bash

@@ -6,7 +6,10 @@ set -euo pipefail
 source_dir="$1"; deps="$2"; build_dir="$3"
 project_dir="$(cd "$(dirname "$0")/.." && pwd)"
 [[ ! -e "$build_dir" ]] || { echo 'Refusing to reuse the build directory.' >&2; exit 3; }
-[[ "$(git -C "$source_dir" rev-parse HEAD)" == c3aa70f81e15ea97ee85b6a9a71cbf75d370851e ]]
+# The original upstream archive is verified by SHA256 before extraction. Its
+# file-only snapshot tree is pinned here; no upstream Git history is fabricated.
+[[ "${CITRON_SOURCE_ARCHIVE_SHA256:-}" == f65d17c8fcdc46046422d024eaa5ab49be43ec5ec4655eeffb0562efcac61349 ]]
+[[ "$(git -C "$source_dir" rev-parse 'HEAD^{tree}')" == 12b651a8f494087aaef84dd8d92ceb1d6fe2f315 ]]
 [[ -z "$(git -C "$source_dir" status --porcelain)" ]] || { echo 'Source checkout is not clean.' >&2; exit 4; }
 # Own anonymous guest-backing lazy-zero candidate: exact pinned source only.
 python3 - "$source_dir" <<'PY_IOS_LAZY_ZERO_BEFORE'
@@ -93,14 +96,61 @@ for name,digest in {'src/core/hle/kernel/code_set.h': '53ff513141efb2572f5de562d
 assert not (r/'src/common/ios_initial_code_zero.h').exists(),'Initial-code zero helper already exists'
 PY_IOS_NSO_ZERO_TAIL_BEFORE
 
+# V20 negative control: compile the exact old production ObjectPool header.
+python3 - "$source_dir" "$project_dir/tests/ios-shader-pool-storage.cpp" <<'PY_V20_LEGACY_PINS'
+import hashlib,pathlib,sys
+r=pathlib.Path(sys.argv[1]);t=pathlib.Path(sys.argv[2])
+assert hashlib.sha256((r/'src/shader_recompiler/object_pool.h').read_bytes()).hexdigest()=='bdc825b50ea19aa09040c924b7a1b47cf2bd6e8ff2ed96150a822259d21af2dd'
+assert hashlib.sha256(t.read_bytes()).hexdigest()=='feb5fa6f8433198f2f9f9299be710de269d58b5d6f9fc0d903b6de505f145c50'
+PY_V20_LEGACY_PINS
+mkdir -p "$deps/build"
+env -u SDKROOT -u IPHONEOS_DEPLOYMENT_TARGET -u CFLAGS -u CXXFLAGS -u CPPFLAGS -u LDFLAGS \
+    xcrun --sdk macosx clang++ -std=c++23 -O1 -UNDEBUG -DCITRON_SHADER_POOL_LEGACY_PROBE=1 \
+    -isysroot "$(xcrun --sdk macosx --show-sdk-path)" \
+    -I "$source_dir/src" "$project_dir/tests/ios-shader-pool-storage.cpp" \
+    -o "$deps/build/shader-pool-v19-negative-control"
+"$deps/build/shader-pool-v19-negative-control" | tee "$deps/build/shader-pool-v19-negative-control.log"
+grep -Fx 'PASS_NEGATIVE_CONTROL_V19_OBJECT_POOL_SKIPS_OWNED_T_DESTRUCTION' "$deps/build/shader-pool-v19-negative-control.log"
+
 while IFS= read -r patch_name; do
     [[ -n "$patch_name" && "$patch_name" != \#* ]] || continue
     [[ "$patch_name" != */* && "$patch_name" == *.patch ]] || exit 5
     patch_file="$project_dir/patches/$patch_name"
     [[ -f "$patch_file" ]] || { echo "Missing candidate patch: $patch_name" >&2; exit 6; }
+    if [[ "$patch_name" == 0006-ios-shader-pool-storage.patch ]]; then
+        python3 - "$source_dir" <<'PY_V20_POOL_BEFORE'
+import hashlib,pathlib,sys
+r=pathlib.Path(sys.argv[1]).resolve(strict=True)
+for name,digest in {'src/shader_recompiler/object_pool.h': 'bdc825b50ea19aa09040c924b7a1b47cf2bd6e8ff2ed96150a822259d21af2dd', 'src/shader_recompiler/frontend/ir/value.h': 'd6536fcb506ce2bd0e20a13a0f31e7ef349344257db53872fc9e43b0752c6e11', 'src/video_core/renderer_vulkan/vk_pipeline_cache.h': '7b6e70b2468a0c013fe8da16a7e1e7b65f09403d3c308e5f6b1f6f09a43ca17c', 'src/video_core/renderer_vulkan/vk_pipeline_cache.cpp': '0f99b686202908eee225d48a7352d11ea0267e99683315899335f09daebc2e01', 'src/common/ios_shader_pool_storage.h': None}.items():
+ p=r/name
+ if digest is None:assert not p.exists(), 'New shader storage helper already exists'
+ else:assert not p.is_symlink() and hashlib.sha256(p.read_bytes()).hexdigest()==digest, 'Unexpected V19 pool source: '+name
+PY_V20_POOL_BEFORE
+    fi
     git -C "$source_dir" apply --check "$patch_file"
     git -C "$source_dir" apply "$patch_file"
 done < "$project_dir/patches/series.txt"
+
+# V20 exact output and real Inst lifetime-definition binding for the host regression.
+python3 - "$source_dir" "$project_dir/tests/ios-shader-pool-storage.cpp" <<'PY_V20_POOL_AFTER'
+import hashlib,pathlib,re,sys
+r=pathlib.Path(sys.argv[1]).resolve(strict=True)
+for name,digest in {'src/shader_recompiler/object_pool.h': '62b5cfec923ed97ea20346f28036b9709e7d37c18b7193083fdc268466dab4f2', 'src/shader_recompiler/frontend/ir/value.h': '0b5defe4d09325820e06151510a32874ff74df50b23ad80bb230b2e7429c1174', 'src/video_core/renderer_vulkan/vk_pipeline_cache.h': '1ff6fc2f8f0e9765c4206fc7a76e95db29df99cbe75dad117c247eded61989ba', 'src/video_core/renderer_vulkan/vk_pipeline_cache.cpp': '2d14d9d33e49cc424da714499ebf060b84a6886e232ed0a860126fc86afee31e', 'src/common/ios_shader_pool_storage.h': '297321594f4c82eaed0bb5f936efe5e12944efd7981e3fad6ff074ac7d868705'}.items():
+ p=r/name
+ assert not p.is_symlink() and p.resolve(strict=True).is_relative_to(r)
+ assert hashlib.sha256(p.read_bytes()).hexdigest()==digest, 'Unexpected V20 pool source: '+name
+p=r/'src/shader_recompiler/frontend/ir/microinstruction.cpp';raw=p.read_bytes()
+assert hashlib.sha256(raw).hexdigest()=='f675745d7da2388d4ce34ed96015a322edf9f1d613e46c0394558d1afe90d1e2'
+patterns=[r'Inst::Inst\(IR::Opcode op_, u32 flags_\) noexcept : op\{op_\}, flags\{flags_\} \{\n.*?\n\}',r'Inst::~Inst\(\) \{\n.*?\n\}']
+parts=[]
+for pattern in patterns:
+ found=re.findall(pattern,raw.decode('utf-8'),re.S);assert len(found)==1;parts.append(found[0])
+definitions='// Exact production definitions, extracted by pinned source hash.\nnamespace Shader::IR {\n'+'\n\n'.join(parts)+'\n}\n'
+assert hashlib.sha256(definitions.encode()).hexdigest()=='eb3d34b1b21e5d6aebb912ad010830d6226cd517591fba6055c116d883838a79'
+test=pathlib.Path(sys.argv[2]).read_bytes()
+assert hashlib.sha256(test).hexdigest()=='feb5fa6f8433198f2f9f9299be710de269d58b5d6f9fc0d903b6de505f145c50'
+assert definitions in test.decode('utf-8')
+PY_V20_POOL_AFTER
 
 # V19: actual NSO policy/source and combined original ownership regression.
 python3 - "$source_dir" "$project_dir/tests/virtual-buffer-ownership.cpp" <<'PY_IOS_NSO_ZERO_TAIL_AFTER'
@@ -776,8 +826,15 @@ assert hashlib.sha256(p.read_bytes()).hexdigest()=='9d1eff350256fd9f7ccecf739c47
 print('Pinned Boost numeric_conversion complete interface attached to legacy headers; no Boost version or runtime change.')
 PY_BOOST_NUMERIC_INTERFACE
 
-# Only this small submodule is needed here; CPM otherwise fetches an unpatched copy.
-git -C "$source_dir" submodule update --init --depth=1 -- externals/oaknut
+# The original archive omits Git submodule links. Fetch the same pinned Oaknut
+# commit directly from its original maintainer; CPM must use the patched copy.
+oaknut_dir="$source_dir/externals/oaknut"
+[[ ! -e "$oaknut_dir" ]] || { echo 'Refusing an existing Oaknut source directory.' >&2; exit 8; }
+git init -q "$oaknut_dir"
+git -C "$oaknut_dir" config core.autocrlf false
+git -C "$oaknut_dir" remote add origin https://github.com/merryhime/oaknut.git
+git -C "$oaknut_dir" fetch --depth=1 origin 94c726ce0338b054eb8cb5ea91de8fe6c19f4392
+git -C "$oaknut_dir" checkout --detach -q FETCH_HEAD
 [[ "$(git -C "$source_dir/externals/oaknut" rev-parse HEAD)" == 94c726ce0338b054eb8cb5ea91de8fe6c19f4392 ]]
 git -C "$source_dir/externals/oaknut" apply --check "$project_dir/patches/oaknut-jit-errors.patch"
 git -C "$source_dir/externals/oaknut" apply "$project_dir/patches/oaknut-jit-errors.patch"
@@ -1309,6 +1366,38 @@ cmake -S "$source_dir" -B "$build_dir" -G Xcode \
     -DCITRON_IOS_BUNDLE_IDENTIFIER=org.citron.experimental-ios \
     -DGLSLANGVALIDATOR="$(command -v glslangValidator)" \
     -DCMAKE_XCODE_ATTRIBUTE_CODE_SIGNING_ALLOWED=NO
+# V20 host regressions use the actual patched production headers and pinned CPM
+# header roots. They are host Mac programs, never linked against iPhone archives.
+python3 - "$source_dir" "$build_dir" "$deps/build" "$project_dir/tests/ios-shader-pool-storage.cpp" <<'PY_V20_POOL_HOST'
+import hashlib,os,pathlib,subprocess,sys
+source,build,output,test=map(pathlib.Path,sys.argv[1:])
+assert hashlib.sha256(test.read_bytes()).hexdigest()=='feb5fa6f8433198f2f9f9299be710de269d58b5d6f9fc0d903b6de505f145c50'
+lines=(build/'CMakeCache.txt').read_text(encoding='utf-8').splitlines()
+def package(key):
+ prefix=key+':INTERNAL=';found=[x[len(prefix):] for x in lines if x.startswith(prefix)]
+ assert len(found)==1 and found[0], 'Missing exact CPM header root: '+key
+ p=pathlib.Path(found[0]).resolve(strict=True);assert p.is_dir();return p
+boost=package('CPM_PACKAGE_Boost_SOURCE_DIR');fmt=package('CPM_PACKAGE_fmt_SOURCE_DIR')
+assert (fmt/'include/fmt/ranges.h').is_file()
+include_dirs=sorted(p for p in (boost/'libs').rglob('include') if p.is_dir())
+assert any((p/'boost/container/small_vector.hpp').is_file() for p in include_dirs)
+env=os.environ.copy()
+for key in ('SDKROOT','IPHONEOS_DEPLOYMENT_TARGET','CFLAGS','CXXFLAGS','CPPFLAGS','LDFLAGS'):env.pop(key,None)
+sdk=subprocess.check_output(['xcrun','--sdk','macosx','--show-sdk-path'],env=env,text=True).strip()
+base=['xcrun','--sdk','macosx','clang++','-std=c++23','-O1','-UNDEBUG','-DCITRON_IOS=1','-DFMT_HEADER_ONLY=1','-pthread','-isysroot',sdk,'-I',str(source/'src'),'-I',str(fmt/'include')]
+for p in include_dirs:base+=['-I',str(p)]
+markers=['PASS_ACTUAL_IR_INST_STORAGE_TRIM_REUSE_WITH_PINNED_LIFETIME_DEFINITIONS','PASS_IOS_SHADER_OBJECT_POOL_OWNED_DESTRUCTION_2048_LIFETIMES_AND_NOALLOC_TRIM','PASS_IOS_SHADER_POOL_WRAPPER_ASYNC_ERROR_FIXTURE_NOT_VULKAN_RUNTIME_PROOF']
+for suffix,flags in (('host',[]),('sanitized',['-fsanitize=address,undefined','-fno-sanitize-recover=all','-fno-omit-frame-pointer'])):
+ binary=output/('shader-pool-storage-'+suffix+'-test')
+ subprocess.run(base+flags+[str(test),'-o',str(binary)],env=env,check=True)
+ result=subprocess.run([str(binary)],env=env,check=True,text=True,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
+ assert len(result.stdout)<65536 and len(result.stderr)<65536
+ (output/('shader-pool-storage-'+suffix+'.log')).write_text(result.stdout+result.stderr,encoding='utf-8')
+ for marker in markers:assert marker in result.stdout.splitlines(), 'Missing production pool regression marker'
+ print(result.stdout,end='');print(result.stderr,end='',file=sys.stderr)
+ if suffix=='sanitized':print('PASS_IOS_SHADER_POOL_HOST_ASAN_UBSAN_NOT_IOS_RUNTIME_PROOF')
+PY_V20_POOL_HOST
+
 cmake --build "$build_dir" --config Release --target CitronIOS --parallel 2 -- \
     CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY= \
     EXPANDED_CODE_SIGN_IDENTITY=

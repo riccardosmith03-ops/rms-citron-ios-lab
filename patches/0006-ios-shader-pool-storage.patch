@@ -1,0 +1,279 @@
+--- a/src/shader_recompiler/object_pool.h
++++ b/src/shader_recompiler/object_pool.h
+@@ -6,6 +6,11 @@
+ #include <memory>
+ #include <type_traits>
+ #include <utility>
++#include <vector>
++
++#if defined(CITRON_IOS)
++#include "common/ios_shader_pool_storage.h"
++#endif
+ 
+ namespace Shader {
+ 
+@@ -20,7 +25,17 @@
+     template <typename... Args>
+         requires std::is_constructible_v<T, Args...>
+     [[nodiscard]] T* Create(Args&&... args) {
++#if defined(CITRON_IOS)
++        // A failed constructor never creates a live T. Publish the slot count
++        // only after construction, so cleanup cannot destroy an unconstructed T.
++        Chunk* const chunk = FreeChunk();
++        T* const object = std::construct_at(&chunk->storage[chunk->used_objects].object,
++                                           std::forward<Args>(args)...);
++        ++chunk->used_objects;
++        return object;
++#else
+         return std::construct_at(Memory(), std::forward<Args>(args)...);
++#endif
+     }
+ 
+     void ReleaseContents() {
+@@ -40,6 +55,27 @@
+         chunks.shrink_to_fit();
+         node = &chunks.front();
+     }
++
++#if defined(CITRON_IOS)
++    // All objects must be dead at this compiler-owner boundary. This releases
++    // excess scratch storage, never compiled shaders or GPU resources.
++    void ReleaseContentsAndTrim(size_t retained_bytes) noexcept {
++        static_assert(std::is_nothrow_destructible_v<T>);
++        for (auto& chunk : chunks) {
++            chunk.Release();
++        }
++        Common::IOS::TrimUnusedPoolChunks(chunks, retained_bytes, [](const auto& chunk) noexcept {
++            return Common::IOS::SaturatingStorageProduct(chunk.num_objects, sizeof(Storage));
++        });
++        node = chunks.empty() ? nullptr : &chunks.front();
++    }
++
++    [[nodiscard]] size_t StorageBytes() const noexcept {
++        return Common::IOS::PoolStorageBytes(chunks, [](const auto& chunk) noexcept {
++            return Common::IOS::SaturatingStorageProduct(chunk.num_objects, sizeof(Storage));
++        });
++    }
++#endif
+ 
+ private:
+     struct NonTrivialDummy {
+@@ -76,7 +112,15 @@
+         }
+ 
+         void Release() {
++#if defined(CITRON_IOS)
++            // Storage is a union with an intentionally empty destructor. Destroy
++            // the active T itself; destroying Storage would leak T's own owners.
++            for (size_t index = 0; index < used_objects; ++index) {
++                std::destroy_at(&storage[index].object);
++            }
++#else
+             std::destroy_n(storage.get(), used_objects);
++#endif
+             used_objects = 0;
+         }
+ 
+@@ -91,11 +135,25 @@
+     }
+ 
+     [[nodiscard]] Chunk* FreeChunk() {
++#if defined(CITRON_IOS)
++        // Trimming may leave no chunks. Retained empty chunks are reused in order
++        // before allocating another chunk; no pointers to their old objects survive.
++        if (node == nullptr) {
++            node = &chunks.emplace_back(new_chunk_size);
++            return node;
++        }
++        if (node->used_objects == node->num_objects) {
++            const size_t next = static_cast<size_t>(node - chunks.data()) + 1;
++            node = next < chunks.size() ? &chunks[next] : &chunks.emplace_back(new_chunk_size);
++        }
++        return node;
++#else
+         if (node->used_objects != node->num_objects) {
+             return node;
+         }
+         node = &chunks.emplace_back(new_chunk_size);
+         return node;
++#endif
+     }
+ 
+     Chunk* node{};
+--- a/src/shader_recompiler/frontend/ir/value.h
++++ b/src/shader_recompiler/frontend/ir/value.h
+@@ -16,6 +16,9 @@
+ 
+ #include "common/assert.h"
+ #include "common/common_types.h"
++#if defined(CITRON_IOS)
++#include "common/ios_shader_pool_storage.h"
++#endif
+ #include "shader_recompiler/exception.h"
+ #include "shader_recompiler/frontend/ir/attribute.h"
+ #include "shader_recompiler/frontend/ir/opcodes.h"
+@@ -381,6 +384,22 @@
+         count = 0;
+     }
+ 
++#if defined(CITRON_IOS)
++    // Called only after translation has returned and its IR consumers are gone.
++    void ReleaseContentsAndTrim(size_t retained_bytes) noexcept {
++        ReleaseContents();
++        Common::IOS::TrimUnusedPoolChunks(chunks, retained_bytes, [](const auto&) noexcept {
++            return sizeof(Slot) * chunk_size;
++        });
++    }
++
++    [[nodiscard]] size_t StorageBytes() const noexcept {
++        return Common::IOS::PoolStorageBytes(chunks, [](const auto&) noexcept {
++            return sizeof(Slot) * chunk_size;
++        });
++    }
++#endif
++
+ private:
+     union Slot {
+         Slot() noexcept {}
+--- a/src/video_core/renderer_vulkan/vk_pipeline_cache.h
++++ b/src/video_core/renderer_vulkan/vk_pipeline_cache.h
+@@ -85,6 +85,23 @@
+ using VideoCommon::ShaderInfo;
+ 
+ struct ShaderPools {
++#if defined(CITRON_IOS)
++    Common::IOS::ShaderPoolTrimStats ReleaseUnusedStorageForIOS() noexcept {
++        const auto before = StorageBytesForIOS();
++        // Preserve the existing destruction order: flow objects, IR blocks,
++        // instructions. No active translation may retain a pool pointer here.
++        flow_block.ReleaseContentsAndTrim(Common::IOS::FLOW_POOL_RETAIN_BYTES);
++        block.ReleaseContentsAndTrim(Common::IOS::BLOCK_POOL_RETAIN_BYTES);
++        inst.ReleaseContentsAndTrim(Common::IOS::INST_POOL_RETAIN_BYTES);
++        return {before, StorageBytesForIOS()};
++    }
++
++    [[nodiscard]] size_t StorageBytesForIOS() const noexcept {
++        return Common::IOS::SaturatingStorageSum(inst.StorageBytes(),
++            Common::IOS::SaturatingStorageSum(block.StorageBytes(), flow_block.StorageBytes()));
++    }
++#endif
++
+     void ReleaseContents() {
+         flow_block.ReleaseContents();
+         block.ReleaseContents();
+--- a/src/video_core/renderer_vulkan/vk_pipeline_cache.cpp
++++ b/src/video_core/renderer_vulkan/vk_pipeline_cache.cpp
+@@ -21,6 +21,9 @@
+ #include "common/fs/path_util.h"
+ #include "common/profiling.h"
+ #include "common/settings.h"
++#if defined(CITRON_IOS)
++#include "common/scope_exit.h"
++#endif
+ #include "common/thread_worker.h"
+ #include "core/core.h"
+ #include "shader_recompiler/backend/spirv/emit_spirv.h"
+@@ -1075,9 +1078,21 @@
+     GraphicsEnvironments environments;
+     GetGraphicsEnvironments(environments, graphics_key.unique_hashes);
+ 
++#if defined(CITRON_IOS)
++    main_pools.ReleaseUnusedStorageForIOS();
++    // OUTER scope: the inner builder's function-try-block may create a diagnostic
++    // CFG in its catch handler. Reclaim only after that whole call has returned.
++    // Cleanup is allocation-free and deliberately contains no logging.
++    auto release_ir = MakeScopeGuard([&] { main_pools.ReleaseUnusedStorageForIOS(); });
++#else
+     main_pools.ReleaseContents();
++#endif
+     auto pipeline{
+         CreateGraphicsPipeline(main_pools, graphics_key, environments.Span(), nullptr, true)};
++#if defined(CITRON_IOS)
++    main_pools.ReleaseUnusedStorageForIOS();
++    release_ir.Cancel();
++#endif
+     if (!pipeline || pipeline_cache_filename.empty()) {
+         return pipeline;
+     }
+@@ -1103,8 +1118,20 @@
+     ComputeEnvironment env{*kepler_compute, *gpu_memory, program_base, qmd.program_start};
+     env.SetCachedSize(shader->size_bytes);
+ 
++#if defined(CITRON_IOS)
++    main_pools.ReleaseUnusedStorageForIOS();
++    // OUTER scope: the inner builder's function-try-block may create a diagnostic
++    // CFG in its catch handler. Reclaim only after that whole call has returned.
++    // Cleanup is allocation-free and deliberately contains no logging.
++    auto release_ir = MakeScopeGuard([&] { main_pools.ReleaseUnusedStorageForIOS(); });
++#else
+     main_pools.ReleaseContents();
++#endif
+     auto pipeline{CreateComputePipeline(main_pools, key, env, nullptr, true)};
++#if defined(CITRON_IOS)
++    main_pools.ReleaseUnusedStorageForIOS();
++    release_ir.Cancel();
++#endif
+     if (!pipeline || pipeline_cache_filename.empty()) {
+         return pipeline;
+     }
+--- /dev/null
++++ b/src/common/ios_shader_pool_storage.h
+@@ -0,0 +1,58 @@
++// SPDX-FileCopyrightText: Copyright 2026 RMS contributors
++// SPDX-License-Identifier: GPL-2.0-or-later
++#pragma once
++
++#include <cstddef>
++#include <limits>
++
++namespace Common::IOS {
++
++// Retained UNUSED compiler slots, not a cap on an active translation or GPU cache.
++inline constexpr std::size_t INST_POOL_RETAIN_BYTES = 8 * 1024 * 1024;
++inline constexpr std::size_t BLOCK_POOL_RETAIN_BYTES = 1024 * 1024;
++inline constexpr std::size_t FLOW_POOL_RETAIN_BYTES = 1024 * 1024;
++
++struct ShaderPoolTrimStats {
++    std::size_t before_bytes;
++    std::size_t after_bytes;
++};
++
++constexpr std::size_t SaturatingStorageSum(std::size_t a, std::size_t b) noexcept {
++    return b > std::numeric_limits<std::size_t>::max() - a
++        ? std::numeric_limits<std::size_t>::max() : a + b;
++}
++
++constexpr std::size_t SaturatingStorageProduct(std::size_t a, std::size_t b) noexcept {
++    return b != 0 && a > std::numeric_limits<std::size_t>::max() / b
++        ? std::numeric_limits<std::size_t>::max() : a * b;
++}
++
++template <typename Chunks, typename Bytes>
++std::size_t PoolStorageBytes(const Chunks& chunks, Bytes&& bytes) noexcept {
++    std::size_t total = 0;
++    for (const auto& chunk : chunks) {
++        total = SaturatingStorageSum(total, bytes(chunk));
++    }
++    return total;
++}
++
++// PRECONDITION: the owner has already destroyed every live object. This performs
++// no allocation, shrink_to_fit, logging, VM operations or concurrent mutation.
++// Vector descriptor capacity is deliberately not included in the slot-byte bound.
++template <typename Chunks, typename Bytes>
++void TrimUnusedPoolChunks(Chunks& chunks, std::size_t retained_bytes, Bytes&& bytes) noexcept {
++    std::size_t keep = 0, total = 0;
++    for (const auto& chunk : chunks) {
++        const auto amount = bytes(chunk);
++        if (amount > retained_bytes - total) {
++            break;
++        }
++        total += amount;
++        ++keep;
++    }
++    // This only reduces size. Slot arrays are deleted; the vector's descriptors
++    // retain their small capacity, avoiding an allocation during exception cleanup.
++    chunks.resize(keep);
++}
++
++} // namespace Common::IOS
