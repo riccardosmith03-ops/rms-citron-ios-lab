@@ -101,7 +101,7 @@ python3 - "$source_dir" "$project_dir/tests/ios-shader-pool-storage.cpp" <<'PY_V
 import hashlib,pathlib,sys
 r=pathlib.Path(sys.argv[1]);t=pathlib.Path(sys.argv[2])
 assert hashlib.sha256((r/'src/shader_recompiler/object_pool.h').read_bytes()).hexdigest()=='bdc825b50ea19aa09040c924b7a1b47cf2bd6e8ff2ed96150a822259d21af2dd'
-assert hashlib.sha256(t.read_bytes()).hexdigest()=='feb5fa6f8433198f2f9f9299be710de269d58b5d6f9fc0d903b6de505f145c50'
+assert hashlib.sha256(t.read_bytes()).hexdigest()=='daa5b353a98a1ec240e6c4f66e21a0be1511a7ea244642589b1ceea0f8f9194e'
 PY_V20_LEGACY_PINS
 mkdir -p "$deps/build"
 env -u SDKROOT -u IPHONEOS_DEPLOYMENT_TARGET -u CFLAGS -u CXXFLAGS -u CPPFLAGS -u LDFLAGS \
@@ -148,7 +148,7 @@ for pattern in patterns:
 definitions='// Exact production definitions, extracted by pinned source hash.\nnamespace Shader::IR {\n'+'\n\n'.join(parts)+'\n}\n'
 assert hashlib.sha256(definitions.encode()).hexdigest()=='eb3d34b1b21e5d6aebb912ad010830d6226cd517591fba6055c116d883838a79'
 test=pathlib.Path(sys.argv[2]).read_bytes()
-assert hashlib.sha256(test).hexdigest()=='feb5fa6f8433198f2f9f9299be710de269d58b5d6f9fc0d903b6de505f145c50'
+assert hashlib.sha256(test).hexdigest()=='daa5b353a98a1ec240e6c4f66e21a0be1511a7ea244642589b1ceea0f8f9194e'
 assert definitions in test.decode('utf-8')
 PY_V20_POOL_AFTER
 
@@ -1371,7 +1371,7 @@ cmake -S "$source_dir" -B "$build_dir" -G Xcode \
 python3 - "$source_dir" "$build_dir" "$deps/build" "$project_dir/tests/ios-shader-pool-storage.cpp" <<'PY_V20_POOL_HOST'
 import hashlib,os,pathlib,subprocess,sys
 source,build,output,test=map(pathlib.Path,sys.argv[1:])
-assert hashlib.sha256(test.read_bytes()).hexdigest()=='feb5fa6f8433198f2f9f9299be710de269d58b5d6f9fc0d903b6de505f145c50'
+assert hashlib.sha256(test.read_bytes()).hexdigest()=='daa5b353a98a1ec240e6c4f66e21a0be1511a7ea244642589b1ceea0f8f9194e'
 lines=(build/'CMakeCache.txt').read_text(encoding='utf-8').splitlines()
 def package(key):
  prefix=key+':INTERNAL=';found=[x[len(prefix):] for x in lines if x.startswith(prefix)]

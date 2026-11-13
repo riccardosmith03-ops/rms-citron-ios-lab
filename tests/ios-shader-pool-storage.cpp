@@ -213,7 +213,7 @@ void ActualSharedChunkPolicy() {
     std::vector<std::unique_ptr<unsigned char[]>> chunks;
     constexpr std::size_t chunk_bytes = 1024 * 1024;
     for (unsigned i = 0; i < 12; ++i) chunks.push_back(std::make_unique<unsigned char[]>(chunk_bytes));
-    const auto bytes = [](const auto&) noexcept { return chunk_bytes; };
+    const auto bytes = [chunk_bytes](const auto&) noexcept { return chunk_bytes; };
     assert(I::PoolStorageBytes(chunks, bytes) == 12 * chunk_bytes);
     const auto frees = AllocationAudit::array_deletions.load();
     AllocationAudit::forbid = true;
