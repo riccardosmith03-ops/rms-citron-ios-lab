@@ -42,6 +42,7 @@ int main() {
 #include <atomic>
 #include <cassert>
 #include <cstddef>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <future>
@@ -79,7 +80,10 @@ Inst::~Inst() {
 }
 
 namespace AllocationAudit {
-struct alignas(std::max_align_t) Header { std::size_t bytes; };
+inline constexpr std::size_t default_new_alignment = __STDCPP_DEFAULT_NEW_ALIGNMENT__;
+static_assert(default_new_alignment >= alignof(std::max_align_t));
+struct alignas(__STDCPP_DEFAULT_NEW_ALIGNMENT__) Header { std::size_t bytes; };
+static_assert(sizeof(Header) % default_new_alignment == 0);
 inline std::atomic<bool> forbid{};
 inline std::atomic<std::size_t> array_bytes{}, array_allocations{}, array_deletions{};
 }
@@ -132,6 +136,53 @@ void TrimWithoutAllocation(Pool& pool, std::size_t budget) {
     AllocationAudit::forbid = false;
     assert(OwnedNode::live == 0 && OwnedNode::owned_bytes == 0);
     assert(pool.StorageBytes() <= budget);
+}
+
+struct alignas(__STDCPP_DEFAULT_NEW_ALIGNMENT__) CookieProbe {
+    static inline std::size_t destroyed{};
+    unsigned char value{};
+    ~CookieProbe() noexcept { ++destroyed; }
+};
+
+[[gnu::noinline]] std::unique_ptr<CookieProbe[]> AllocateCookieProbes(std::size_t count) {
+    return std::make_unique<CookieProbe[]>(count);
+}
+
+void AllocationAlignmentContract() {
+    using namespace AllocationAudit;
+    std::printf("ALLOCATOR_ALIGNMENT max_align=%zu default_new=%zu header_align=%zu header_size=%zu\n",
+                alignof(std::max_align_t), default_new_alignment, alignof(Header), sizeof(Header));
+    const auto baseline = array_bytes.load();
+    const auto allocations = array_allocations.load();
+    const auto deletions = array_deletions.load();
+    constexpr std::size_t sizes[] = {0, 1, 8, 15, 16, 17, 64};
+    for (const auto bytes : sizes) {
+        void* const raw = ::operator new[](bytes);
+        volatile std::uintptr_t address = reinterpret_cast<std::uintptr_t>(raw);
+        assert(address % default_new_alignment == 0);
+        ::operator delete[](raw);
+        assert(array_bytes.load() == baseline);
+    }
+    assert(array_allocations.load() - allocations == 7);
+    assert(array_deletions.load() - deletions == 7);
+    const auto destroyed = CookieProbe::destroyed;
+    const auto cookie_allocations = array_allocations.load();
+    const auto cookie_deletions = array_deletions.load();
+    {
+        auto values = AllocateCookieProbes(3);
+        assert(array_allocations.load() - cookie_allocations == 1);
+        assert(array_deletions.load() == cookie_deletions);
+        assert(array_bytes.load() > baseline);
+        for (std::size_t index = 0; index < 3; ++index) {
+            volatile std::uintptr_t address = reinterpret_cast<std::uintptr_t>(&values[index]);
+            assert(address % alignof(CookieProbe) == 0);
+        }
+    }
+    assert(CookieProbe::destroyed - destroyed == 3);
+    assert(array_deletions.load() - cookie_deletions == 1);
+    assert(array_bytes.load() == baseline);
+    assert(array_allocations.load() - allocations == 8);
+    assert(array_deletions.load() - deletions == 8);
 }
 
 void DestructionAndReuse() {
@@ -314,6 +365,7 @@ void ActualInstStorage() {
 } // namespace
 
 int main() {
+    AllocationAlignmentContract();
     DestructionAndReuse();
     ConstructorFailures();
     RepeatedLifetimes();
