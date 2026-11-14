@@ -1390,11 +1390,13 @@ markers=['PASS_ACTUAL_IR_INST_STORAGE_TRIM_REUSE_WITH_PINNED_LIFETIME_DEFINITION
 for suffix,flags in (('host',[]),('sanitized',['-fsanitize=address,undefined','-fno-sanitize-recover=all','-fno-omit-frame-pointer'])):
  binary=output/('shader-pool-storage-'+suffix+'-test')
  subprocess.run(base+flags+[str(test),'-o',str(binary)],env=env,check=True)
- result=subprocess.run([str(binary)],env=env,check=True,text=True,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
+ result=subprocess.run([str(binary)],env=env,check=False,text=True,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
+ bounded_stdout=result.stdout[:65535];bounded_stderr=result.stderr[:65535]
+ (output/('shader-pool-storage-'+suffix+'.log')).write_text(bounded_stdout+bounded_stderr,encoding='utf-8')
+ print(bounded_stdout,end='',flush=True);print(bounded_stderr,end='',file=sys.stderr,flush=True)
  assert len(result.stdout)<65536 and len(result.stderr)<65536
- (output/('shader-pool-storage-'+suffix+'.log')).write_text(result.stdout+result.stderr,encoding='utf-8')
+ result.check_returncode()
  for marker in markers:assert marker in result.stdout.splitlines(), 'Missing production pool regression marker'
- print(result.stdout,end='');print(result.stderr,end='',file=sys.stderr)
  if suffix=='sanitized':print('PASS_IOS_SHADER_POOL_HOST_ASAN_UBSAN_NOT_IOS_RUNTIME_PROOF')
 PY_V20_POOL_HOST
 
